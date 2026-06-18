@@ -207,6 +207,7 @@ pip-delete-this-directory.txt
 .coverage.*
 .cache
 .pytest_cache/
+.ruff_cache/
 .mypy_cache/
 .dmypy.json
 dmypy.json
