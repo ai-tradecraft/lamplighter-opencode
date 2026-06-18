@@ -1,0 +1,52 @@
+# ---------------------------------------------------------------------------
+# Azure DevOps Pipeline — THIN WRAPPER
+# ---------------------------------------------------------------------------
+# This pipeline deliberately contains no build logic. It only:
+#   1. checks out the code,
+#   2. installs the pinned prerequisites (Python + pre-commit),
+#   3. runs `make ci`.
+#
+# All actual checks live in the Makefile (`make ci`) and run identically on a
+# developer laptop and in GitHub Actions (.github/workflows/ci.yml). To change
+# WHAT runs in CI, edit the Makefile and .pre-commit-config.yaml — not this
+# file. The only things that belong here are platform-specific concerns that
+# cannot live in a portable script: triggers, the agent image, and
+# prerequisite installation.
+#
+# Determinism: tool versions are pinned (Python below; hook versions via `rev`
+# in .pre-commit-config.yaml). Bump them deliberately.
+
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+
+pr:
+  branches:
+    include:
+      - develop
+
+pool:
+  vmImage: ubuntu-latest
+
+steps:
+  # Python 3.10 is required by the commitizen / sync-pre-commit-deps hooks
+  # (see .pre-commit-config.yaml). Keep this in sync with the README.
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: "3.10"
+
+  # Cache pre-commit hook environments keyed on the config so unchanged hooks
+  # are not rebuilt on every run.
+  - task: Cache@2
+    inputs:
+      key: 'pre-commit | "$(Agent.OS)" | .pre-commit-config.yaml'
+      path: $(HOME)/.cache/pre-commit
+
+  - script: pipx install pre-commit
+    displayName: Install pre-commit
+
+  # The single entrypoint. Everything CI does is defined in the Makefile.
+  - script: make ci
+    displayName: make ci

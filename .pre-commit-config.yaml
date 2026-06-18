@@ -1,0 +1,51 @@
+# See https://pre-commit.com/hooks.html for more hooks
+# See https://pre-commit.com for more information
+
+# NOTE ON THE PYTHON INTERPRETER PIN
+# ----------------------------------
+# Several `language: python` hooks here (commitizen, sync-pre-commit-deps)
+# require Python >= 3.10. pre-commit otherwise uses each hook's own default
+# interpreter, which is `python3` in their manifests — and on many systems
+# (notably macOS) `python3` resolves to an older 3.9 that fails to build the
+# hook environments with `requires a different Python`.
+#
+# A top-level `default_language_version` does NOT help here: per pre-commit's
+# rules it only applies to hooks that do *not* declare their own
+# `language_version`, and these hooks' manifests already set
+# `language_version: python3`. The only way to override that is an explicit
+# per-hook `language_version` below.
+#
+# `python3.10` is a version request that pre-commit resolves to a real
+# interpreter on Windows, Linux, and macOS (on Windows via the `py` launcher,
+# e.g. `py -3.10`). A Python 3.10 interpreter must be installed; see the
+# README Requirements. To standardize on a newer version, change the
+# `language_version` values below (and update the README/Makefile checks).
+repos:
+  - repo: https://github.com/pre-commit/sync-pre-commit-deps
+    rev: v0.0.4
+    hooks:
+    -   id: sync-pre-commit-deps
+        language_version: python3.10
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+    -   id: trailing-whitespace
+    -   id: end-of-file-fixer
+    -   id: check-yaml
+    -   id: check-added-large-files
+    -   id: check-case-conflict
+    -   id: check-illegal-windows-names
+    -   id: check-merge-conflict
+    -   id: detect-private-key
+    -   id: fix-byte-order-marker
+    -   id: mixed-line-ending
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1  # Specify the desired version of Gitleaks
+    hooks:
+      - id: gitleaks
+  - repo: https://github.com/commitizen-tools/commitizen
+    rev: v4.16.3
+    hooks:
+     -  id: commitizen
+        stages: [commit-msg]
+        language_version: python3.10
