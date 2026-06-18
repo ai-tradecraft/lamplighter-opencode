@@ -3,17 +3,15 @@
 # ---------------------------------------------------------------------------
 # This workflow deliberately contains no build logic. It only:
 #   1. checks out the code,
-#   2. installs the pinned prerequisites (Python + pre-commit),
-#   3. runs `make ci`.
+#   2. installs uv (the single machine-level prerequisite),
+#   3. installs the remaining dependencies via uv (`make install-deps`),
+#   4. runs `make ci`.
 #
-# All actual checks live in the Makefile (`make ci`) and run identically on a
-# developer laptop. To change WHAT runs in CI, edit the Makefile and
-# .pre-commit-config.yaml — not this file. The only things that belong here are
-# platform-specific concerns that cannot live in a portable script: triggers,
-# the runner image, and prerequisite installation.
-#
-# Determinism: tool versions are pinned (Python below; hook versions via `rev`
-# in .pre-commit-config.yaml). Bump them deliberately.
+# Everything else is uv-managed and isolated: the project's Python (3.12+), the
+# hooks' Python 3.10, pre-commit, and just are all provisioned by uv inside
+# `make install-deps` — nothing is installed into the system environment. To
+# change WHAT runs in CI, edit the Makefile / justfile / .pre-commit-config.yaml
+# — not this file.
 name: ci
 
 on:
@@ -28,20 +26,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Python 3.10 is required by the commitizen / sync-pre-commit-deps hooks
-      # (see .pre-commit-config.yaml). Keep this in sync with the README.
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
+      # uv is the only prerequisite; it provisions everything else (Python
+      # interpreters, pre-commit, just, project deps) in its managed cache.
+      - uses: astral-sh/setup-uv@v5
 
-      # Cache pre-commit hook environments keyed on the config so unchanged
-      # hooks are not rebuilt on every run.
-      - uses: actions/cache@v4
-        with:
-          path: ~/.cache/pre-commit
-          key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
-
-      - run: pipx install pre-commit
-
-      # The single entrypoint. Everything CI does is defined in the Makefile.
+      # Install all uv-managed dependencies, then run the single entrypoint.
+      - run: make install-deps
       - run: make ci
