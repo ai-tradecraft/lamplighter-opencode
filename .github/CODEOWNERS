@@ -1,0 +1,6 @@
+# Code owners for lamplighter-opencode.
+# Code-owner review is required by the `develop`/`main` branch rulesets.
+# See https://docs.github.com/articles/about-code-owners
+
+# Default owner for everything in the repo.
+* @mxwlf
