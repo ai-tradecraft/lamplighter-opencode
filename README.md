@@ -36,7 +36,7 @@ changes).
 
 ```sh
 git clone <this-repo>
-cd bootstrapping-repo
+cd lamplighter-opencode
 
 make install-deps             # uv-provisions Python, pre-commit, just, deps
                               # (bootstraps uv itself if it's missing)

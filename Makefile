@@ -102,13 +102,15 @@ setup: install-deps ## Install dependencies and configure the repo to use the sh
 # ---------------------------------------------------------------------------
 # CI ENTRYPOINT
 # ---------------------------------------------------------------------------
-# `make ci` is the SINGLE command CI/CD pipelines invoke. Both the GitHub
-# Actions workflow (.github/workflows/ci.yml) and the Azure DevOps pipeline
-# (azure-pipelines.yml) do nothing more than: check out the code, ensure uv is
-# present, and run `make ci` (which installs the rest via uv). All actual logic
-# lives here, in-repo, so it runs identically on a laptop and on every CI
-# platform.
-ci: lint qa ## Run the full CI check suite (what pipelines invoke)
+# `make ci` runs the checks (lint + qa). It assumes the uv-managed
+# dependencies are already provisioned; it does NOT depend on `install-deps`,
+# so a developer with deps in place can re-run checks without re-provisioning.
+# CI provisions first: both the GitHub Actions workflow
+# (.github/workflows/ci.yml) and the Azure DevOps pipeline
+# (azure-pipelines.yml) do nothing more than check out the code, install uv,
+# run `make install-deps`, then `make ci`. All actual check logic lives here,
+# in-repo, so it runs identically on a laptop and on every CI platform.
+ci: lint qa ## Run the full CI check suite (assumes deps installed; CI runs `make install-deps` first)
 
 lint: check-uv ## Run all pre-commit hooks against all files (same hooks as the git hooks)
 	@PATH="$(PRECOMMIT_PATH)" $(PRECOMMIT) run --all-files --show-diff-on-failure

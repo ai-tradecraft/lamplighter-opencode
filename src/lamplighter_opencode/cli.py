@@ -7,9 +7,11 @@ app = typer.Typer()
 console = Console()
 
 
-@app.command()
-def main() -> None:
-    """Print the Lamplighter for OpenCode welcome message."""
+@app.callback(invoke_without_command=True)
+def main(ctx: typer.Context) -> None:
+    """Print the Lamplighter for OpenCode welcome message when run with no subcommand."""
+    if ctx.invoked_subcommand is not None:
+        return
     console.print("Welcome to Lamplighter for OpenCode")
 
 
