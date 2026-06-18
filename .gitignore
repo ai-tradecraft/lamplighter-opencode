@@ -1,0 +1,464 @@
+# ==============================================================================
+# .gitignore — Global ignore patterns
+# Covers common OS, editor, language, build-tool, and runtime artifacts.
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# Operating Systems
+# ------------------------------------------------------------------------------
+
+## macOS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+.AppleDouble
+.LSOverride
+Icon
+
+## Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+*.lnk
+
+## Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+
+# ------------------------------------------------------------------------------
+# Editors & IDEs
+# ------------------------------------------------------------------------------
+
+## Visual Studio Code
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+!.vscode/*.code-snippets
+*.code-workspace
+.history/
+
+## JetBrains (IntelliJ, PyCharm, WebStorm, etc.)
+.idea/
+*.iml
+*.iws
+*.ipr
+out/
+.idea_modules/
+
+## Vim / Neovim
+*.swp
+*.swo
+*.swn
+*~
+.netrwhist
+.vim/
+Session.vim
+Sessionx.vim
+tags
+
+## Emacs
+*~
+\#*\#
+/.emacs.desktop
+/.emacs.desktop.lock
+*.elc
+auto-save-list
+tramp
+.\#*
+.org-id-locations
+*_archive
+*_flymake.*
+/eshell/history
+/eshell/lastdir
+/elpa/
+*.rel
+
+## Sublime Text
+*.tmlanguage.cache
+*.tmPreferences.cache
+*.stTheme.cache
+*.sublime-workspace
+*.sublime-project
+
+## Eclipse
+.metadata
+bin/
+tmp/
+*.tmp
+*.bak
+*.swp
+*~.nib
+local.properties
+.settings/
+.loadpath
+.recommenders
+.classpath
+.project
+.externalToolBuilders/
+*.launch
+*.pydevproject
+.cproject
+.autotools
+.factorypath
+.buildpath
+.target
+.tern-project
+.texlipse
+.springBeans
+.recommenders/
+.apt_generated/
+.apt_generated_test/
+.cache-main
+.scala_dependencies
+.worksheet
+
+## Xcode
+*.xcodeproj/*
+!*.xcodeproj/project.pbxproj
+!*.xcodeproj/xcshareddata/
+!*.xcodeproj/project.xcworkspace/
+!*.xcodeproj/xcshareddata/xcschemes
+*.xcworkspace/*
+!*.xcworkspace/contents.xcworkspacedata
+!*.xcworkspace/xcshareddata/
+xcuserdata/
+*.moved-aside
+*.pbxuser
+*.mode1v3
+*.mode2v3
+*.perspectivev3
+!default.pbxuser
+!default.mode1v3
+!default.mode2v3
+!default.perspectivev3
+DerivedData/
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# ------------------------------------------------------------------------------
+# Languages & Runtimes
+# ------------------------------------------------------------------------------
+
+## Node.js / JavaScript / TypeScript
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions
+.npm
+.eslintcache
+.stylelintcache
+.parcel-cache
+.cache/
+dist/
+build/
+out/
+.output/
+.nuxt/
+.next/
+.svelte-kit/
+.vite/
+vite.config.*.timestamp-*
+*.tsbuildinfo
+
+## Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+ENV/
+env.bak/
+venv.bak/
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+.pytest_cache/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+htmlcov/
+*.egg-info/
+dist/
+build/
+eggs/
+parts/
+var/
+sdist/
+wheels/
+*.egg
+MANIFEST
+celerybeat-schedule
+celerybeat.pid
+*.sage.py
+profile_default/
+ipython_config.py
+.ipynb_checkpoints
+*.mo
+*.pot
+
+## Ruby / Rails
+*.gem
+*.rbc
+/.config
+/coverage/
+/InstalledFiles
+/pkg/
+/spec/reports/
+/spec/examples.txt
+/test/tmp/
+/test/version_tmp/
+/tmp/
+.bundle/
+.byebug_history
+vendor/bundle
+Gemfile.lock
+
+## Java / Kotlin / Gradle / Maven
+*.class
+*.jar
+*.war
+*.ear
+*.nar
+hs_err_pid*
+replay_pid*
+.gradle/
+build/
+target/
+!.mvn/wrapper/maven-wrapper.jar
+!**/src/main/**/target/
+!**/src/test/**/target/
+local.properties
+.classpath
+.project
+.settings/
+bin/
+*.iml
+
+## Go
+*.exe
+*.exe~
+*.test
+*.out
+vendor/
+go.sum
+
+## Rust
+/target/
+Cargo.lock
+
+## .NET / C#
+obj/
+bin/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.userprefs
+[Dd]ebug/
+[Dd]ebugPublic/
+[Rr]elease/
+[Rr]eleases/
+x64/
+x86/
+[Ww][Ii][Nn]32/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+bld/
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+[Ll]ogs/
+*.pidb
+*.svclog
+*.scc
+*.nupkg
+*.snupkg
+*.publishsettings
+*.azurePubxml
+project.lock.json
+project.fragment.lock.json
+artifacts/
+**/Properties/launchSettings.json
+
+## PHP / Composer
+/vendor/
+composer.phar
+
+## Swift / Xcode
+.build/
+Packages/
+Package.resolved
+*.resolved
+
+## Elixir / Erlang
+/_build/
+/deps/
+/doc/
+/.elixir_ls/
+erl_crash.dump
+*.ez
+*.beam
+
+## Haskell / Stack
+.stack-work/
+dist-newstyle/
+cabal.project.local
+cabal.project.local~
+.ghc.environment.*
+*.hi
+*.o
+
+# ------------------------------------------------------------------------------
+# Build tools & task runners
+# ------------------------------------------------------------------------------
+
+## CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CTestTestfile.cmake
+_deps/
+
+## Make
+Makefile.in
+
+## Docker
+.docker/
+
+# ------------------------------------------------------------------------------
+# Cloud & Infrastructure
+# ------------------------------------------------------------------------------
+
+## Terraform
+.terraform/
+.terraform.lock.hcl
+terraform.tfstate
+terraform.tfstate.backup
+*.tfvars
+!*.tfvars.example
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+## Ansible
+*.retry
+
+## Pulumi
+.pulumi/
+
+# ------------------------------------------------------------------------------
+# Testing & coverage
+# ------------------------------------------------------------------------------
+
+coverage/
+.nyc_output/
+*.lcov
+test-results/
+junit.xml
+*.snap
+
+# ------------------------------------------------------------------------------
+# Secrets & environment variables
+# ------------------------------------------------------------------------------
+
+.env
+.env.*
+!.env.example
+!.env.template
+!.env.*.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+id_rsa
+id_rsa.pub
+id_dsa
+id_dsa.pub
+id_ecdsa
+id_ecdsa.pub
+id_ed25519
+id_ed25519.pub
+
+# ------------------------------------------------------------------------------
+# Logs & databases
+# ------------------------------------------------------------------------------
+
+*.log
+logs/
+*.sqlite
+*.sqlite3
+*.db
+
+# ------------------------------------------------------------------------------
+# Miscellaneous
+# ------------------------------------------------------------------------------
+
+# Archives (usually not source-controlled)
+*.7z
+*.dmg
+*.gz
+*.iso
+*.jar
+*.rar
+*.tar
+*.zip
+
+# Compiled binary files
+*.com
+*.class
+*.dll
+*.exe
+*.o
+*.so
+*.dylib
+
+# Patch files
+*.orig
+*.rej
+
+# Lock files (keep language-specific ones if desired)
+# package-lock.json  # uncomment to ignore npm lock file
+# yarn.lock          # uncomment to ignore Yarn lock file
