@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tradecraft.local/schemas/lamplighter/agent_session_spec.schema.json",
+  "title": "AgentSessionSpec",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["agent_session_id", "workspace_ref", "context_package", "backend"],
+  "properties": {
+    "agent_session_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "goal_run_id": {
+      "type": ["string", "null"]
+    },
+    "phase_run_id": {
+      "type": ["string", "null"]
+    },
+    "agent_definition_id": {
+      "type": ["string", "null"]
+    },
+    "resolved_agent_profile_id": {
+      "type": ["string", "null"]
+    },
+    "workspace_ref": {
+      "type": "string",
+      "minLength": 1
+    },
+    "repo_ref": {
+      "type": ["string", "null"]
+    },
+    "base_revision": {
+      "type": ["string", "null"]
+    },
+    "branch_name": {
+      "type": ["string", "null"]
+    },
+    "context_package": {
+      "type": "object"
+    },
+    "backend": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "server", "config", "required_env_vars"],
+      "properties": {
+        "kind": {
+          "const": "opencode"
+        },
+        "server": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["host", "port"],
+          "properties": {
+            "host": {
+              "type": "string",
+              "minLength": 1
+            },
+            "port": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            }
+          }
+        },
+        "config": {
+          "type": "object",
+          "required": ["provider", "model"],
+          "properties": {
+            "provider": {
+              "type": "string",
+              "minLength": 1
+            },
+            "model": {
+              "type": "string",
+              "minLength": 1
+            },
+            "wire_api": {
+              "type": "string",
+              "default": "responses"
+            }
+          },
+          "additionalProperties": true
+        },
+        "required_env_vars": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "tool_profile": {
+      "type": "object"
+    },
+    "mcp_profile": {
+      "type": "object"
+    },
+    "artifact_contract": {
+      "type": "object"
+    },
+    "timeout_policy": {
+      "type": "object"
+    },
+    "telemetry": {
+      "type": "object"
+    }
+  }
+}

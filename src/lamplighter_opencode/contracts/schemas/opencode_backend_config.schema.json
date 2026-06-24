@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tradecraft.local/schemas/lamplighter/opencode_backend_config.schema.json",
+  "title": "OpenCodeBackendConfig",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "server", "config", "required_env_vars"],
+  "properties": {
+    "kind": {
+      "const": "opencode"
+    },
+    "server": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["host", "port"],
+      "properties": {
+        "host": {
+          "type": "string",
+          "minLength": 1
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        }
+      }
+    },
+    "config": {
+      "type": "object",
+      "required": ["provider", "model"],
+      "properties": {
+        "provider": {
+          "type": "string",
+          "minLength": 1
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "wire_api": {
+          "type": "string",
+          "default": "responses"
+        }
+      },
+      "additionalProperties": true
+    },
+    "required_env_vars": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    }
+  }
+}
