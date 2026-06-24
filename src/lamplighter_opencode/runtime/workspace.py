@@ -34,13 +34,13 @@ def materialize_session_workspace(
     validate_backend_environment: bool = True,
 ) -> SessionWorkspace:
     """Create the local session layout and persist validated session files."""
-    from lamplighter_opencode.backends.foundry_config import validate_foundry_environment
+    from lamplighter_opencode.backends.environment import validate_required_environment
 
     spec_value = spec.to_dict()
     validate_contract("agent_session_spec.schema.json", spec_value)
 
     if validate_backend_environment:
-        validate_foundry_environment(spec.backend)
+        validate_required_environment(spec.backend.required_env_vars)
 
     session_root = runtime_root / "sessions" / spec.agent_session_id
     workspace = SessionWorkspace(

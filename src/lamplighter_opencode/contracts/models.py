@@ -11,32 +11,50 @@ JsonObject = dict[str, Any]
 
 
 @dataclass(frozen=True)
-class FoundryBackendConfig:
-    """Microsoft Foundry configuration referenced by an agent session."""
+class OpenCodeServerConfig:
+    """OpenCode server binding for an agent session."""
 
-    provider_kind: Literal["microsoft_foundry"]
-    model: str
-    base_url_env_var: str
-    api_key_env_var: str
-    wire_api: Literal["responses"] = "responses"
+    host: str = "127.0.0.1"
+    port: int = 4096
 
     @classmethod
-    def from_dict(cls, value: JsonObject) -> FoundryBackendConfig:
+    def from_dict(cls, value: JsonObject) -> OpenCodeServerConfig:
         return cls(
-            provider_kind=value["provider_kind"],
-            model=value["model"],
-            base_url_env_var=value["base_url_env_var"],
-            api_key_env_var=value["api_key_env_var"],
-            wire_api=value.get("wire_api", "responses"),
+            host=value.get("host", "127.0.0.1"),
+            port=value.get("port", 4096),
         )
 
     def to_dict(self) -> JsonObject:
         return {
-            "provider_kind": self.provider_kind,
-            "model": self.model,
-            "base_url_env_var": self.base_url_env_var,
-            "api_key_env_var": self.api_key_env_var,
-            "wire_api": self.wire_api,
+            "host": self.host,
+            "port": self.port,
+        }
+
+
+@dataclass(frozen=True)
+class OpenCodeBackendConfig:
+    """OpenCode backend configuration referenced by an agent session."""
+
+    kind: Literal["opencode"]
+    server: OpenCodeServerConfig
+    config: JsonObject
+    required_env_vars: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, value: JsonObject) -> OpenCodeBackendConfig:
+        return cls(
+            kind=value["kind"],
+            server=OpenCodeServerConfig.from_dict(value["server"]),
+            config=value["config"],
+            required_env_vars=value.get("required_env_vars", []),
+        )
+
+    def to_dict(self) -> JsonObject:
+        return {
+            "kind": self.kind,
+            "server": self.server.to_dict(),
+            "config": self.config,
+            "required_env_vars": self.required_env_vars,
         }
 
 
@@ -47,7 +65,7 @@ class AgentSessionSpec:
     agent_session_id: str
     workspace_ref: str
     context_package: JsonObject
-    backend: FoundryBackendConfig
+    backend: OpenCodeBackendConfig
     goal_run_id: str | None = None
     phase_run_id: str | None = None
     agent_definition_id: str | None = None
@@ -67,7 +85,7 @@ class AgentSessionSpec:
             agent_session_id=value["agent_session_id"],
             workspace_ref=value["workspace_ref"],
             context_package=value["context_package"],
-            backend=FoundryBackendConfig.from_dict(value["backend"]),
+            backend=OpenCodeBackendConfig.from_dict(value["backend"]),
             goal_run_id=value.get("goal_run_id"),
             phase_run_id=value.get("phase_run_id"),
             agent_definition_id=value.get("agent_definition_id"),

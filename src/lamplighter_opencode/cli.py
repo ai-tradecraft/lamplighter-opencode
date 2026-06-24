@@ -31,7 +31,7 @@ RuntimeRootOption = Annotated[
 ]
 SkipBackendEnvCheckOption = Annotated[
     bool,
-    typer.Option(help="Skip Foundry environment variable presence checks. Intended for contract-only tests."),
+    typer.Option(help="Skip backend environment variable presence checks. Intended for contract-only tests."),
 ]
 
 

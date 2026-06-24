@@ -4,26 +4,53 @@
   "title": "OpenCodeBackendConfig",
   "type": "object",
   "additionalProperties": false,
-  "required": ["provider_kind", "model", "base_url_env_var", "api_key_env_var"],
+  "required": ["kind", "server", "config", "required_env_vars"],
   "properties": {
-    "provider_kind": {
-      "const": "microsoft_foundry"
+    "kind": {
+      "const": "opencode"
     },
-    "model": {
-      "type": "string",
-      "minLength": 1
+    "server": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["host", "port"],
+      "properties": {
+        "host": {
+          "type": "string",
+          "minLength": 1
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        }
+      }
     },
-    "base_url_env_var": {
-      "type": "string",
-      "minLength": 1
+    "config": {
+      "type": "object",
+      "required": ["provider", "model"],
+      "properties": {
+        "provider": {
+          "type": "string",
+          "minLength": 1
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "wire_api": {
+          "type": "string",
+          "default": "responses"
+        }
+      },
+      "additionalProperties": true
     },
-    "api_key_env_var": {
-      "type": "string",
-      "minLength": 1
-    },
-    "wire_api": {
-      "const": "responses",
-      "default": "responses"
+    "required_env_vars": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
     }
   }
 }

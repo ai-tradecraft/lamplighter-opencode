@@ -13,7 +13,8 @@ def test_agent_session_spec_validates() -> None:
     spec = AgentSessionSpec.from_dict(value)
 
     assert spec.agent_session_id == "session-1"
-    assert spec.backend.provider_kind == "microsoft_foundry"
+    assert spec.backend.kind == "opencode"
+    assert spec.backend.config["provider"] == "azure"
 
 
 def test_agent_session_spec_rejects_extra_properties() -> None:
@@ -52,11 +53,17 @@ def _valid_session_spec() -> dict[str, object]:
         "workspace_ref": "local://workspace",
         "context_package": {"goal": "test"},
         "backend": {
-            "provider_kind": "microsoft_foundry",
-            "model": "gpt-test",
-            "base_url_env_var": "AZURE_OPENAI_BASE_URL",
-            "api_key_env_var": "AZURE_OPENAI_API_KEY",
-            "wire_api": "responses",
+            "kind": "opencode",
+            "server": {
+                "host": "127.0.0.1",
+                "port": 4096,
+            },
+            "config": {
+                "provider": "azure",
+                "model": "gpt-test",
+                "wire_api": "responses",
+            },
+            "required_env_vars": ["AZURE_OPENAI_BASE_URL", "AZURE_OPENAI_API_KEY"],
         },
         "tool_profile": {},
         "mcp_profile": {},
