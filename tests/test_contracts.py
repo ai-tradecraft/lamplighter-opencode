@@ -36,6 +36,16 @@ def test_agent_turn_request_is_named_for_agent_work() -> None:
     validate_contract("agent_turn_request.schema.json", request.to_dict())
 
 
+def test_validate_contract_rejects_path_like_schema_names() -> None:
+    with pytest.raises(ContractValidationError, match="Invalid schema name"):
+        validate_contract("../agent_session_spec.schema.json", {})
+
+
+def test_validate_contract_wraps_missing_schema_load_failures() -> None:
+    with pytest.raises(ContractValidationError, match="Schema not found or unreadable"):
+        validate_contract("missing.schema.json", {})
+
+
 def _valid_session_spec() -> dict[str, object]:
     return {
         "agent_session_id": "session-1",

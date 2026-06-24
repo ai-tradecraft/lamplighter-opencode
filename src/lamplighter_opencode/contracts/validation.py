@@ -9,6 +9,7 @@ from typing import Any
 from jsonschema import Draft202012Validator
 
 JsonObject = dict[str, Any]
+SCHEMAS_DIR = Path(__file__).parent / "schemas"
 
 
 class ContractValidationError(ValueError):
@@ -31,9 +32,21 @@ def validate_contract(schema_name: str, value: JsonObject) -> None:
 
 
 def _load_schema(schema_name: str) -> JsonObject:
-    schema_path = Path(__file__).parent / "schemas" / schema_name
-    with schema_path.open(encoding="utf-8") as schema_file:
-        loaded = json.load(schema_file)
+    if schema_name in {".", ".."} or "/" in schema_name or "\\" in schema_name:
+        msg = f"Invalid schema name: {schema_name}"
+        raise ContractValidationError(msg)
+
+    schema_path = SCHEMAS_DIR / schema_name
+    try:
+        with schema_path.open(encoding="utf-8") as schema_file:
+            loaded = json.load(schema_file)
+    except OSError as exc:
+        msg = f"Schema not found or unreadable: {schema_name}"
+        raise ContractValidationError(msg) from exc
+    except json.JSONDecodeError as exc:
+        msg = f"Schema {schema_name} must contain valid JSON"
+        raise ContractValidationError(msg) from exc
+
     if not isinstance(loaded, dict):
         msg = f"Schema {schema_name} must contain a JSON object"
         raise ContractValidationError(msg)
