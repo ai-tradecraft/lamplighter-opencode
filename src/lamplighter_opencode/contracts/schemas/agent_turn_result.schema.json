@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tradecraft.local/schemas/lamplighter/agent_turn_result.schema.json",
+  "title": "AgentTurnResult",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "agent_session_id", "request_id", "status", "started_at", "ended_at"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "agent_session_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "request_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "enum": ["completed", "failed", "cancelled"]
+    },
+    "started_at": {
+      "type": "string",
+      "minLength": 1
+    },
+    "ended_at": {
+      "type": "string",
+      "minLength": 1
+    },
+    "message": {
+      "type": ["string", "null"]
+    },
+    "artifact_refs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "changed_files": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "commands_observed": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "events_ref": {
+      "type": ["string", "null"]
+    },
+    "failure_report": {
+      "type": ["object", "null"]
+    }
+  }
+}

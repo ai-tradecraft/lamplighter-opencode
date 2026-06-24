@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tradecraft.local/schemas/lamplighter/opencode_backend_config.schema.json",
+  "title": "OpenCodeBackendConfig",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["provider_kind", "model", "base_url_env_var", "api_key_env_var"],
+  "properties": {
+    "provider_kind": {
+      "const": "microsoft_foundry"
+    },
+    "model": {
+      "type": "string",
+      "minLength": 1
+    },
+    "base_url_env_var": {
+      "type": "string",
+      "minLength": 1
+    },
+    "api_key_env_var": {
+      "type": "string",
+      "minLength": 1
+    },
+    "wire_api": {
+      "const": "responses",
+      "default": "responses"
+    }
+  }
+}
