@@ -6,4 +6,6 @@ public sealed record RunnerOptions
     public Uri OrchestratorBaseUri { get; init; } = new("http://127.0.0.1:5087");
     public TimeSpan PollInterval { get; init; } = TimeSpan.FromSeconds(2);
     public TimeSpan LongPollWait { get; init; } = TimeSpan.FromSeconds(30);
+    public int LeaseSeconds { get; init; } = 60;
+    public TimeSpan RetryBackoff { get; init; } = TimeSpan.FromSeconds(5);
 }

@@ -7,6 +7,7 @@ namespace ChatThroughHarness.Runner;
 
 public sealed class RunnerWorker(
     IOptions<RunnerOptions> options,
+    RunnerCommandLoop commandLoop,
     ILogger<RunnerWorker> logger) : BackgroundService
 {
     private readonly RunnerOptions _options = options.Value;
@@ -35,12 +36,6 @@ public sealed class RunnerWorker(
             "Runner registration prepared with {CapabilityCount} capabilities.",
             registration.Capabilities.Count);
 
-        while (!stoppingToken.IsCancellationRequested)
-        {
-            logger.LogDebug(
-                "Runner {RunnerId} idle until command loop is implemented.",
-                _options.RunnerId);
-            await Task.Delay(_options.PollInterval, stoppingToken);
-        }
+        await commandLoop.RunAsync(stoppingToken);
     }
 }
