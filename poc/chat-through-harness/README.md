@@ -5,6 +5,13 @@ ASP.NET + React proof of concept for sending a prompt through the
 
 ## Run
 
+Optional local env examples are available in:
+
+- `../../.env.example` for Lamplighter/OpenCode backend variables.
+- `src/ChatThroughHarness.Api/.env.example` for API variables.
+- `src/ChatThroughHarness.Runner/.env.example` for runner variables.
+- `client/.env.example` for Vite/React variables.
+
 From the `lamplighter-opencode` repo root, start the API:
 
 ```sh

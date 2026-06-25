@@ -41,7 +41,7 @@ type Diagnostics = {
   logPath: string;
 };
 
-const api = "";
+const api = import.meta.env.VITE_API_BASE_URL ?? "";
 
 function App() {
   const [session, setSession] = useState<Session | null>(null);
