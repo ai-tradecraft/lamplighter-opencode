@@ -22,6 +22,8 @@
 #   make ci           # run the full CI check suite (what pipelines invoke)
 #   make lint         # run all pre-commit hooks against all files
 #   make qa           # run the Python checks (ruff format/lint, ty, pytest)
+#   make test-chat-through-harness
+#                     # run Python + ASP.NET + React POC checks
 
 .DEFAULT_GOAL := help
 
@@ -40,7 +42,7 @@ PRECOMMIT_PATH = $(if $(HOOK_PYTHON_BIN),$(HOOK_PYTHON_BIN):$(PATH),$(PATH))
 PRECOMMIT := uvx pre-commit
 JUST := uvx --from rust-just just
 
-.PHONY: help doctor install-deps setup ci lint qa test-real-backend print-real-backend-fingerprint check-uv
+.PHONY: help doctor install-deps setup ci lint qa test-chat-through-harness test-real-backend print-real-backend-fingerprint check-uv
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
@@ -134,6 +136,9 @@ test-real-backend: check-uv ## Run the opt-in real OpenCode backend integration 
 	LAMPLIGHTER_OPENCODE_USE_REAL_BACKEND=1 \
 	LAMPLIGHTER_OPENCODE_CONFIG_MODE=project-only \
 	uv run pytest -m integration tests/test_real_backend_e2e.py
+
+test-chat-through-harness: check-uv ## Run Python + ASP.NET + React checks for the chat-through-harness POC
+	./scripts/test-chat-through-harness.sh
 
 print-real-backend-fingerprint: check-uv ## Print non-secret fingerprints of real backend env values
 	@if [ -f .env ]; then set -a; . ./.env; set +a; fi; \

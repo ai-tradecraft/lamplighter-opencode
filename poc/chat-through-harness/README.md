@@ -5,28 +5,56 @@ ASP.NET + React proof of concept for sending a prompt through the
 
 ## Run
 
-From this folder:
+From the `lamplighter-opencode` repo root, start the API:
 
 ```sh
+cd poc/chat-through-harness
 dotnet run --project src/ChatThroughHarness.Api
 ```
 
-In another terminal:
+In another terminal, start the runner. The runner is the local process that
+polls the API for work, prepares Lamplighter sessions, starts `opencode serve`,
+submits turns, and reports results/events back.
 
 ```sh
-cd client
+cd poc/chat-through-harness
+dotnet run --project src/ChatThroughHarness.Runner
+```
+
+In a third terminal, start the React UI:
+
+```sh
+cd poc/chat-through-harness/client
 npm install
 npm run dev
 ```
 
-The API defaults to the deterministic fake harness. To use the Python CLI
-adapter:
+Open the Vite URL shown in the client terminal, usually
+`http://127.0.0.1:5173`.
+
+The browser-facing API enqueues commands for the local runner. For local runs,
+keep the API and runner pointed at the same `.agent-runtime/` folder under
+`poc/chat-through-harness/`.
+
+## Test
 
 ```sh
-CHAT_HARNESS_MODE=cli dotnet run --project src/ChatThroughHarness.Api
+make test-chat-through-harness
 ```
 
-Runtime files are written under `.agent-runtime/`.
+That target runs:
+
+- Python harness checks: Ruff format, Ruff lint, ty, and pytest.
+- ASP.NET checks: solution build and tests.
+- React checks: `npm ci` and production build.
+
+To include the opt-in real OpenCode backend integration test:
+
+```sh
+RUN_REAL_BACKEND=1 make test-chat-through-harness
+```
+
+Runtime files are written under `poc/chat-through-harness/.agent-runtime/`.
 
 ## Real Backend Configuration
 
