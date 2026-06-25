@@ -11,7 +11,7 @@ from rich.console import Console
 
 from lamplighter_opencode.contracts.models import AgentSessionSpec, AgentTurnRequest
 from lamplighter_opencode.contracts.validation import ContractValidationError, validate_contract
-from lamplighter_opencode.runtime.workspace import materialize_session_workspace
+from lamplighter_opencode.runtime.workspace import materialize_session_workspace, start_opencode_server
 from lamplighter_opencode.runtime.workspace import submit_turn as submit_turn_request
 
 app = typer.Typer()
@@ -123,6 +123,34 @@ def submit_turn(
         typer.echo(json.dumps(result.to_dict(), indent=2))
     else:
         console.print(result.message or result.status)
+
+
+@app.command("start-session")
+def start_session(
+    session: Annotated[str, typer.Option()],
+    runtime_root: RuntimeRootOption = Path(".agent-runtime"),
+    host: Annotated[str, typer.Option(help="Host for the local OpenCode server.")] = "127.0.0.1",
+    port: Annotated[int, typer.Option(help="Port for the local OpenCode server. Use 0 to choose a free port.")] = 0,
+    dry_run: Annotated[bool, typer.Option(help="Write endpoint metadata without launching OpenCode.")] = False,
+    json_output: JsonOutputOption = False,
+) -> None:
+    """Start or plan a supervised opencode serve process for a prepared session."""
+    session_root = runtime_root / "sessions" / session
+    if not session_root.exists():
+        console.print(f"[red]Failed to start session:[/red] {session_root} does not exist.")
+        raise typer.Exit(code=1)
+
+    try:
+        metadata = start_opencode_server(session_root, host=host, port=port, dry_run=dry_run)
+    except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
+        console.print(f"[red]Failed to start session:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    if json_output:
+        typer.echo(json.dumps(metadata, indent=2))
+        return
+
+    console.print(f"OpenCode server {metadata['status']} at {metadata['endpoint']}")
 
 
 def _read_json_object(path: Path) -> dict[str, object]:

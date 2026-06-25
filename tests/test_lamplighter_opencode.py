@@ -17,6 +17,7 @@ from lamplighter_opencode.runtime.workspace import (
     opencode_config_mode,
     opencode_environment,
     opencode_run_command,
+    opencode_serve_command,
     submit_turn,
 )
 
@@ -138,6 +139,46 @@ def test_submit_turn_command_returns_fake_result(tmp_path) -> None:
 
     assert result.exit_code == 0
     assert "Fake OpenCode response" in result.stdout
+
+
+def test_start_session_command_writes_opencode_server_metadata(tmp_path) -> None:
+    """start-session dry-run writes endpoint metadata without launching OpenCode."""
+    session_root = tmp_path / ".agent-runtime" / "sessions" / "session_1"
+    (session_root / "workspace").mkdir(parents=True)
+
+    result = runner.invoke(
+        app,
+        [
+            "start-session",
+            "--session",
+            "session_1",
+            "--runtime-root",
+            str(tmp_path / ".agent-runtime"),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "4097",
+            "--dry-run",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "planned"
+    assert payload["endpoint"] == "http://127.0.0.1:4097"
+    assert payload["auth"]["username"] == "opencode"
+    assert payload["auth"]["password"]
+    assert (session_root / "opencode-server.json").exists()
+
+
+def test_project_only_serve_command_uses_pure_mode(tmp_path, monkeypatch) -> None:
+    """project-only server launch prevents user-global plugin loading."""
+    monkeypatch.setenv("LAMPLIGHTER_OPENCODE_CONFIG_MODE", "project-only")
+    command = opencode_serve_command(tmp_path, "127.0.0.1", 4097)
+
+    assert command[:2] == ["opencode", "serve"]
+    assert "--pure" in command
 
 
 def test_opencode_environment_inherits_global_config_by_default(tmp_path, monkeypatch) -> None:

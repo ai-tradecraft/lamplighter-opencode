@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
+import socket
 import subprocess
+import time
 import urllib.error
 import urllib.request
 import uuid
+from base64 import b64encode
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -164,6 +168,100 @@ def submit_turn(request: AgentTurnRequest, root: Path) -> AgentTurnResult:
         message=completed.stdout.strip(),
         commands_observed=observed,
     )
+
+
+def start_opencode_server(
+    root: Path,
+    *,
+    host: str = "127.0.0.1",
+    port: int = 0,
+    dry_run: bool = False,
+    timeout_seconds: float = 15,
+) -> dict[str, Any]:
+    """Start a supervised opencode serve process and persist endpoint metadata."""
+    root = root.resolve()
+    workspace = root / "workspace"
+    logs = root / "logs"
+    workspace.mkdir(parents=True, exist_ok=True)
+    logs.mkdir(parents=True, exist_ok=True)
+
+    mode = opencode_config_mode()
+    if mode != "inherit-global":
+        materialize_opencode_config(root)
+
+    selected_port = port or _find_free_port(host)
+    password = secrets.token_urlsafe(24)
+    command = opencode_serve_command(root, host, selected_port, mode)
+    endpoint = f"http://{host}:{selected_port}"
+    metadata: dict[str, Any] = {
+        "status": "planned" if dry_run else "starting",
+        "endpoint": endpoint,
+        "host": host,
+        "port": selected_port,
+        "pid": None,
+        "auth": {
+            "username": "opencode",
+            "password": password,
+        },
+        "config_mode": mode,
+        "command": _observed_command(command),
+        "workspace": str(workspace),
+        "stdout_log": str(logs / "opencode-serve.stdout.log"),
+        "stderr_log": str(logs / "opencode-serve.stderr.log"),
+        "started_at": datetime.now(UTC).isoformat(),
+    }
+
+    if dry_run:
+        _write_json(root / "opencode-server.json", metadata)
+        return metadata
+
+    stdout_file = (logs / "opencode-serve.stdout.log").open("a", encoding="utf-8")
+    stderr_file = (logs / "opencode-serve.stderr.log").open("a", encoding="utf-8")
+    env = opencode_environment(root, mode)
+    env["OPENCODE_SERVER_USERNAME"] = "opencode"
+    env["OPENCODE_SERVER_PASSWORD"] = password
+    process = subprocess.Popen(
+        command,
+        cwd=workspace,
+        stdout=stdout_file,
+        stderr=stderr_file,
+        text=True,
+        env=env,
+    )
+    metadata["pid"] = process.pid
+    _write_json(root / "opencode-server.json", metadata)
+
+    try:
+        _wait_for_opencode_health(endpoint, password, timeout_seconds)
+    except Exception:
+        process.terminate()
+        metadata["status"] = "failed"
+        metadata["ended_at"] = datetime.now(UTC).isoformat()
+        _write_json(root / "opencode-server.json", metadata)
+        raise
+
+    metadata["status"] = "ready"
+    metadata["ready_at"] = datetime.now(UTC).isoformat()
+    _write_json(root / "opencode-server.json", metadata)
+    return metadata
+
+
+def opencode_serve_command(root: Path, host: str, port: int, mode: str | None = None) -> list[str]:
+    """Build the opencode serve command for the selected configuration mode."""
+    selected_mode = mode or opencode_config_mode()
+    command = [
+        "opencode",
+        "serve",
+        "--hostname",
+        host,
+        "--port",
+        str(port),
+        "--log-level",
+        "INFO",
+    ]
+    if selected_mode != "inherit-global":
+        command.append("--pure")
+    return command
 
 
 def real_backend_enabled() -> bool:
@@ -411,6 +509,38 @@ def azure_openai_resource_name() -> str:
 
     host = urlparse(endpoint).netloc
     return host.split(".", maxsplit=1)[0]
+
+
+def _find_free_port(host: str) -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind((host, 0))
+        return int(sock.getsockname()[1])
+
+
+def _wait_for_opencode_health(endpoint: str, password: str, timeout_seconds: float) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    auth = b64encode(f"opencode:{password}".encode()).decode("ascii")
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        request = urllib.request.Request(
+            f"{endpoint}/global/health",
+            headers={"Authorization": f"Basic {auth}"},
+            method="GET",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=1) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            if payload.get("healthy") is True:
+                return
+        except (OSError, urllib.error.HTTPError, urllib.error.URLError, json.JSONDecodeError) as exc:
+            last_error = exc
+            time.sleep(0.2)
+
+    raise TimeoutError(f"OpenCode server did not become healthy before timeout: {last_error}")
+
+
+def _observed_command(command: list[str]) -> str:
+    return " ".join(f'"{part}"' if " " in part else part for part in command)
 
 
 def _write_json(path: Path, value: object) -> None:
