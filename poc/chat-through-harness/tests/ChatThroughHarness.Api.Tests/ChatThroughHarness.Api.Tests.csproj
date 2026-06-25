@@ -12,5 +12,6 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../../src/ChatThroughHarness.Api/ChatThroughHarness.Api.csproj" />
+    <ProjectReference Include="..\..\src\ChatThroughHarness.Protocol\ChatThroughHarness.Protocol.csproj" />
   </ItemGroup>
 </Project>
