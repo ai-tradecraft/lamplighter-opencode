@@ -1,198 +1,251 @@
-"""Contract models used by the Lamplighter OpenCode CLI."""
+"""Typed Lamplighter contract models."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from datetime import UTC, datetime
+from typing import Any, Literal
+from uuid import uuid4
+
+JsonObject = dict[str, Any]
 
 
-class ContractError(ValueError):
-    """Raised when a JSON contract is invalid."""
+@dataclass(frozen=True)
+class OpenCodeServerConfig:
+    """OpenCode server binding for an agent session."""
+
+    host: str = "127.0.0.1"
+    port: int = 4096
+
+    @classmethod
+    def from_dict(cls, value: JsonObject) -> OpenCodeServerConfig:
+        return cls(
+            host=value.get("host", "127.0.0.1"),
+            port=value.get("port", 4096),
+        )
+
+    def to_dict(self) -> JsonObject:
+        return {
+            "host": self.host,
+            "port": self.port,
+        }
 
 
-def _required_str(data: dict[str, Any], key: str) -> str:
-    value = data.get(key)
-    if not isinstance(value, str) or not value:
-        raise ContractError(f"`{key}` must be a non-empty string.")
-    return value
+@dataclass(frozen=True)
+class OpenCodeBackendConfig:
+    """OpenCode backend configuration referenced by an agent session."""
 
+    kind: Literal["opencode"]
+    server: OpenCodeServerConfig
+    config: JsonObject
+    required_env_vars: list[str] = field(default_factory=list)
 
-def _optional_str(data: dict[str, Any], key: str) -> str | None:
-    value = data.get(key)
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        raise ContractError(f"`{key}` must be a string when provided.")
-    return value
+    @classmethod
+    def from_dict(cls, value: JsonObject) -> OpenCodeBackendConfig:
+        return cls(
+            kind=value["kind"],
+            server=OpenCodeServerConfig.from_dict(value["server"]),
+            config=value["config"],
+            required_env_vars=value.get("required_env_vars", []),
+        )
 
-
-def _string_list(value: Any, key: str) -> list[str]:
-    if value is None:
-        return []
-    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
-        raise ContractError(f"`{key}` must be a list of strings.")
-    return value
+    def to_dict(self) -> JsonObject:
+        return {
+            "kind": self.kind,
+            "server": self.server.to_dict(),
+            "config": self.config,
+            "required_env_vars": self.required_env_vars,
+        }
 
 
 @dataclass(frozen=True)
 class AgentSessionSpec:
-    """Portable session launch contract."""
+    """Portable launch contract materialized by Lamplighter."""
 
     agent_session_id: str
-    goal_run_id: str
-    phase_run_id: str
-    agent_definition_id: str
     workspace_ref: str
-    repo_ref: str
-    branch_name: str
-    backend: dict[str, Any] = field(default_factory=dict)
-    communication_channel: dict[str, Any] = field(default_factory=dict)
-    artifact_contract: dict[str, Any] = field(default_factory=dict)
-    timeout_policy: dict[str, Any] = field(default_factory=dict)
+    context_package: JsonObject
+    backend: OpenCodeBackendConfig
+    goal_run_id: str | None = None
+    phase_run_id: str | None = None
+    agent_definition_id: str | None = None
+    resolved_agent_profile_id: str | None = None
+    repo_ref: str | None = None
+    base_revision: str | None = None
+    branch_name: str | None = None
+    tool_profile: JsonObject = field(default_factory=dict)
+    mcp_profile: JsonObject = field(default_factory=dict)
+    artifact_contract: JsonObject = field(default_factory=dict)
+    timeout_policy: JsonObject = field(default_factory=dict)
+    telemetry: JsonObject = field(default_factory=dict)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> AgentSessionSpec:
-        if not isinstance(data, dict):
-            raise ContractError("AgentSessionSpec must be an object.")
+    def from_dict(cls, value: JsonObject) -> AgentSessionSpec:
+        if "context_package" not in value or "backend" not in value:
+            value = {
+                **value,
+                "context_package": {
+                    "goal": value.get("goal_run_id") or "chat_poc",
+                    "phase": value.get("phase_run_id") or "prompt_response",
+                },
+                "backend": {
+                    "kind": "opencode",
+                    "server": {
+                        "host": "127.0.0.1",
+                        "port": 4096,
+                    },
+                    "config": {
+                        "provider": "azure",
+                        "model": "azure/{env:AZURE_OPENAI_DEPLOYMENT}",
+                        "wire_api": "responses",
+                    },
+                    "required_env_vars": [],
+                },
+            }
         return cls(
-            agent_session_id=_required_str(data, "agent_session_id"),
-            goal_run_id=_required_str(data, "goal_run_id"),
-            phase_run_id=_required_str(data, "phase_run_id"),
-            agent_definition_id=_required_str(data, "agent_definition_id"),
-            workspace_ref=_required_str(data, "workspace_ref"),
-            repo_ref=_required_str(data, "repo_ref"),
-            branch_name=_required_str(data, "branch_name"),
-            backend=dict(data.get("backend") or {}),
-            communication_channel=dict(data.get("communication_channel") or {}),
-            artifact_contract=dict(data.get("artifact_contract") or {}),
-            timeout_policy=dict(data.get("timeout_policy") or {}),
+            agent_session_id=value["agent_session_id"],
+            workspace_ref=value["workspace_ref"],
+            context_package=value["context_package"],
+            backend=OpenCodeBackendConfig.from_dict(value["backend"]),
+            goal_run_id=value.get("goal_run_id"),
+            phase_run_id=value.get("phase_run_id"),
+            agent_definition_id=value.get("agent_definition_id"),
+            resolved_agent_profile_id=value.get("resolved_agent_profile_id"),
+            repo_ref=value.get("repo_ref"),
+            base_revision=value.get("base_revision"),
+            branch_name=value.get("branch_name"),
+            tool_profile=value.get("tool_profile", {}),
+            mcp_profile=value.get("mcp_profile", {}),
+            artifact_contract=value.get("artifact_contract", {}),
+            timeout_policy=value.get("timeout_policy", {}),
+            telemetry=value.get("telemetry", {}),
         )
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> JsonObject:
         return {
             "agent_session_id": self.agent_session_id,
+            "workspace_ref": self.workspace_ref,
+            "context_package": self.context_package,
+            "backend": self.backend.to_dict(),
             "goal_run_id": self.goal_run_id,
             "phase_run_id": self.phase_run_id,
             "agent_definition_id": self.agent_definition_id,
-            "workspace_ref": self.workspace_ref,
+            "resolved_agent_profile_id": self.resolved_agent_profile_id,
             "repo_ref": self.repo_ref,
+            "base_revision": self.base_revision,
             "branch_name": self.branch_name,
-            "backend": self.backend,
-            "communication_channel": self.communication_channel,
+            "tool_profile": self.tool_profile,
+            "mcp_profile": self.mcp_profile,
             "artifact_contract": self.artifact_contract,
             "timeout_policy": self.timeout_policy,
+            "telemetry": self.telemetry,
         }
 
 
 @dataclass(frozen=True)
 class AgentTurnRequest:
-    """One unit of work sent to a prepared agent session."""
+    """One unit of agent work sent to a running session."""
 
     id: str
     agent_session_id: str
-    type: str
+    type: Literal["prompt_response"]
     instruction: str
+    created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+    input_artifact_refs: list[str] = field(default_factory=list)
+    allowed_paths: list[str] = field(default_factory=list)
+    expected_artifacts: list[str] = field(default_factory=list)
     correlation_id: str | None = None
+    timeout_policy: JsonObject = field(default_factory=dict)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> AgentTurnRequest:
-        if not isinstance(data, dict):
-            raise ContractError("AgentTurnRequest must be an object.")
-        request_type = _required_str(data, "type")
-        if request_type != "prompt_response":
-            raise ContractError("Only `prompt_response` turn requests are supported.")
+    def from_dict(cls, value: JsonObject) -> AgentTurnRequest:
         return cls(
-            id=_required_str(data, "id"),
-            agent_session_id=_required_str(data, "agent_session_id"),
-            type=request_type,
-            instruction=_required_str(data, "instruction"),
-            correlation_id=_optional_str(data, "correlation_id"),
+            id=value["id"],
+            agent_session_id=value["agent_session_id"],
+            type=value["type"],
+            instruction=value["instruction"],
+            created_at=value.get("created_at", datetime.now(UTC).isoformat()),
+            input_artifact_refs=value.get("input_artifact_refs", []),
+            allowed_paths=value.get("allowed_paths", []),
+            expected_artifacts=value.get("expected_artifacts", []),
+            correlation_id=value.get("correlation_id"),
+            timeout_policy=value.get("timeout_policy", {}),
         )
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> JsonObject:
         return {
             "id": self.id,
             "agent_session_id": self.agent_session_id,
             "type": self.type,
+            "created_at": self.created_at,
             "instruction": self.instruction,
+            "input_artifact_refs": self.input_artifact_refs,
+            "allowed_paths": self.allowed_paths,
+            "expected_artifacts": self.expected_artifacts,
             "correlation_id": self.correlation_id,
+            "timeout_policy": self.timeout_policy,
         }
 
 
 @dataclass(frozen=True)
-class FailureReport:
-    """Structured failure details for a failed turn."""
-
-    summary: str
-    detail: str | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        return {"summary": self.summary, "detail": self.detail}
-
-
-@dataclass(frozen=True)
 class AgentTurnResult:
-    """Normalized result for one agent turn."""
+    """Normalized result from an agent work request."""
 
     id: str
     agent_session_id: str
     request_id: str
-    status: str
-    message: str
+    status: Literal["completed", "failed", "cancelled"]
+    started_at: str
+    ended_at: str
+    message: str | None = None
     artifact_refs: list[str] = field(default_factory=list)
     changed_files: list[str] = field(default_factory=list)
     commands_observed: list[str] = field(default_factory=list)
-    failure_report: FailureReport | None = None
+    events_ref: str | None = None
+    failure_report: JsonObject | None = None
 
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> AgentTurnResult:
-        if not isinstance(data, dict):
-            raise ContractError("AgentTurnResult must be an object.")
-        failure = data.get("failure_report")
-        failure_report = None
-        if isinstance(failure, dict):
-            failure_report = FailureReport(
-                summary=_required_str(failure, "summary"), detail=_optional_str(failure, "detail")
-            )
-        return cls(
-            id=_required_str(data, "id"),
-            agent_session_id=_required_str(data, "agent_session_id"),
-            request_id=_required_str(data, "request_id"),
-            status=_required_str(data, "status"),
-            message=_required_str(data, "message"),
-            artifact_refs=_string_list(data.get("artifact_refs"), "artifact_refs"),
-            changed_files=_string_list(data.get("changed_files"), "changed_files"),
-            commands_observed=_string_list(data.get("commands_observed"), "commands_observed"),
-            failure_report=failure_report,
-        )
-
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> JsonObject:
         return {
             "id": self.id,
             "agent_session_id": self.agent_session_id,
             "request_id": self.request_id,
             "status": self.status,
+            "started_at": self.started_at,
+            "ended_at": self.ended_at,
             "message": self.message,
             "artifact_refs": self.artifact_refs,
             "changed_files": self.changed_files,
             "commands_observed": self.commands_observed,
-            "failure_report": self.failure_report.to_dict() if self.failure_report else None,
+            "events_ref": self.events_ref,
+            "failure_report": self.failure_report,
         }
 
 
 @dataclass(frozen=True)
 class RuntimeEvent:
-    """Normalized event emitted by the harness."""
+    """Append-only event emitted by Lamplighter while materializing a session."""
 
-    id: str
+    event_type: str
     agent_session_id: str
-    type: str
-    payload: dict[str, Any]
+    payload: JsonObject = field(default_factory=dict)
+    event_id: str = field(default_factory=lambda: str(uuid4()))
+    created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+    trace_id: str | None = None
+    span_id: str | None = None
+    correlation_id: str | None = None
+    causation_id: str | None = None
+    schema_version: str = "1.0"
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> JsonObject:
         return {
-            "id": self.id,
+            "event_id": self.event_id,
+            "event_type": self.event_type,
             "agent_session_id": self.agent_session_id,
-            "type": self.type,
+            "created_at": self.created_at,
+            "trace_id": self.trace_id,
+            "span_id": self.span_id,
+            "correlation_id": self.correlation_id,
+            "causation_id": self.causation_id,
+            "schema_version": self.schema_version,
             "payload": self.payload,
         }

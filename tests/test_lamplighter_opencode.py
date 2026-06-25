@@ -66,7 +66,7 @@ def test_agent_turn_request_requires_prompt_response() -> None:
 def test_prepare_session_command(tmp_path) -> None:
     """prepare-session writes the session workspace."""
     spec_path = tmp_path / "spec.json"
-    workspace = tmp_path / "session_1" / "workspace"
+    workspace = tmp_path / ".agent-runtime" / "sessions" / "session_1" / "workspace"
     spec_path.write_text(
         json.dumps(
             {
@@ -160,5 +160,5 @@ def test_submit_turn_returns_failure_response_for_backend_error(tmp_path, monkey
 
     assert result.status == "failed"
     assert result.failure_report is not None
-    assert result.failure_report.summary == "OpenCode returned a non-zero exit code."
-    assert "Resource not found" in (result.failure_report.detail or "")
+    assert result.failure_report["summary"] == "OpenCode returned a non-zero exit code."
+    assert "Resource not found" in str(result.failure_report["detail"])

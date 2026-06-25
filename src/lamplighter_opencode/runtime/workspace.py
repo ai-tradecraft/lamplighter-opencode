@@ -8,67 +8,121 @@ import subprocess
 import urllib.error
 import urllib.request
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse, urlunparse
 
-from lamplighter_opencode.contracts.io import write_json
-from lamplighter_opencode.contracts.models import AgentSessionSpec, AgentTurnRequest, AgentTurnResult, FailureReport
+from lamplighter_opencode.contracts.models import AgentSessionSpec, AgentTurnRequest, AgentTurnResult, RuntimeEvent
+from lamplighter_opencode.contracts.validation import validate_contract
+from lamplighter_opencode.runtime.events import append_runtime_event
 
 
-def session_root(spec: AgentSessionSpec) -> Path:
-    workspace = Path(spec.workspace_ref).expanduser().resolve()
-    return workspace.parent
+@dataclass(frozen=True)
+class SessionWorkspace:
+    """Paths created for one local Lamplighter agent session."""
+
+    root: Path
+    context_path: Path
+    session_path: Path
+    backend_config_path: Path
+    events_path: Path
+    inbox_dir: Path
+    outbox_dir: Path
+    artifacts_dir: Path
+    logs_dir: Path
+    workspace_dir: Path
 
 
-def prepare_session(spec: AgentSessionSpec) -> dict[str, object]:
-    root = session_root(spec)
-    workspace = Path(spec.workspace_ref).expanduser().resolve()
-    artifacts = Path(str(spec.artifact_contract.get("root") or root / "artifacts")).expanduser().resolve()
-    logs = root / "logs"
+def materialize_session_workspace(
+    spec: AgentSessionSpec,
+    runtime_root: Path,
+    *,
+    validate_backend_environment: bool = True,
+) -> SessionWorkspace:
+    """Create the local session layout and persist validated session files."""
+    from lamplighter_opencode.backends.environment import validate_required_environment
 
-    for path in (root, workspace, artifacts, logs, root / "inbox", root / "outbox"):
-        path.mkdir(parents=True, exist_ok=True)
+    spec_value = spec.to_dict()
+    validate_contract("agent_session_spec.schema.json", spec_value)
 
-    write_json(root / "session.json", spec.to_dict())
-    materialize_opencode_config(root)
-    return {
-        "agent_session_id": spec.agent_session_id,
-        "status": "ready",
-        "workspace_ref": str(workspace),
-        "artifact_root": str(artifacts),
-        "log_path": str(logs),
-    }
+    if validate_backend_environment:
+        validate_required_environment(spec.backend.required_env_vars)
+
+    session_root = runtime_root / "sessions" / spec.agent_session_id
+    workspace = SessionWorkspace(
+        root=session_root,
+        context_path=session_root / "context.json",
+        session_path=session_root / "session.json",
+        backend_config_path=session_root / "opencode-backend.json",
+        events_path=session_root / "events.jsonl",
+        inbox_dir=session_root / "inbox",
+        outbox_dir=session_root / "outbox",
+        artifacts_dir=session_root / "artifacts",
+        logs_dir=session_root / "logs",
+        workspace_dir=session_root / "workspace",
+    )
+
+    for directory in (
+        workspace.inbox_dir,
+        workspace.outbox_dir,
+        workspace.artifacts_dir,
+        workspace.logs_dir,
+        workspace.workspace_dir,
+    ):
+        directory.mkdir(parents=True, exist_ok=True)
+
+    _write_json(workspace.context_path, spec.context_package)
+    _write_json(workspace.session_path, spec_value)
+    _write_json(workspace.backend_config_path, spec.backend.to_dict())
+    materialize_opencode_config(workspace.root)
+
+    append_runtime_event(
+        workspace.events_path,
+        RuntimeEvent(
+            event_type="agent_session.prepared",
+            agent_session_id=spec.agent_session_id,
+            payload={
+                "workspace": str(workspace.workspace_dir),
+                "backend_config": str(workspace.backend_config_path),
+            },
+        ),
+    )
+
+    return workspace
 
 
 def submit_turn(request: AgentTurnRequest, root: Path) -> AgentTurnResult:
-    use_real = real_backend_enabled()
-    if not use_real:
+    """Submit one turn to fake or real OpenCode backend and normalize the result."""
+    started_at = datetime.now(UTC).isoformat()
+    if not real_backend_enabled():
         return AgentTurnResult(
             id=f"result_{uuid.uuid4().hex}",
             agent_session_id=request.agent_session_id,
             request_id=request.id,
             status="completed",
+            started_at=started_at,
+            ended_at=datetime.now(UTC).isoformat(),
             message=f"Fake OpenCode response for `{request.instruction}`.",
-            commands_observed=[],
         )
 
     validate_real_backend_environment()
     materialize_opencode_config(root)
     model = opencode_model()
+    command = [
+        "opencode",
+        "run",
+        "--pure",
+        "--dir",
+        str(root / "workspace"),
+        "--model",
+        model,
+        request.instruction,
+    ]
     try:
         completed = subprocess.run(
-            [
-                "opencode",
-                "run",
-                "--pure",
-                "--dir",
-                str(root / "workspace"),
-                "--model",
-                model,
-                request.instruction,
-            ],
+            command,
             cwd=root / "workspace",
             check=False,
             capture_output=True,
@@ -82,21 +136,27 @@ def submit_turn(request: AgentTurnRequest, root: Path) -> AgentTurnResult:
             agent_session_id=request.agent_session_id,
             request_id=request.id,
             status="failed",
+            started_at=started_at,
+            ended_at=datetime.now(UTC).isoformat(),
             message="OpenCode invocation failed.",
-            failure_report=FailureReport(summary="OpenCode invocation failed.", detail=str(exc)),
+            failure_report={"summary": "OpenCode invocation failed.", "detail": str(exc)},
         )
 
+    observed = [f"opencode run --pure --dir <workspace> --model {model}"]
     if completed.returncode != 0:
         return AgentTurnResult(
             id=f"result_{uuid.uuid4().hex}",
             agent_session_id=request.agent_session_id,
             request_id=request.id,
             status="failed",
+            started_at=started_at,
+            ended_at=datetime.now(UTC).isoformat(),
             message=completed.stdout.strip() or "OpenCode returned a non-zero exit code.",
-            commands_observed=[f"opencode run --pure --dir <workspace> --model {model}"],
-            failure_report=FailureReport(
-                summary="OpenCode returned a non-zero exit code.", detail=completed.stderr[-4000:]
-            ),
+            commands_observed=observed,
+            failure_report={
+                "summary": "OpenCode returned a non-zero exit code.",
+                "detail": completed.stderr[-4000:],
+            },
         )
 
     return AgentTurnResult(
@@ -104,8 +164,10 @@ def submit_turn(request: AgentTurnRequest, root: Path) -> AgentTurnResult:
         agent_session_id=request.agent_session_id,
         request_id=request.id,
         status="completed",
+        started_at=started_at,
+        ended_at=datetime.now(UTC).isoformat(),
         message=completed.stdout.strip(),
-        commands_observed=[f"opencode run --pure --dir <workspace> --model {model}"],
+        commands_observed=observed,
     )
 
 
@@ -153,7 +215,6 @@ def validate_real_backend_environment() -> None:
 def verify_azure_openai_api_key() -> str:
     """Make one direct Azure OpenAI Responses API call using the injected API key."""
     validate_real_backend_environment()
-    url = azure_openai_responses_url()
     body = json.dumps(
         {
             "model": os.environ["AZURE_OPENAI_DEPLOYMENT"],
@@ -161,7 +222,7 @@ def verify_azure_openai_api_key() -> str:
         }
     ).encode("utf-8")
     request = urllib.request.Request(
-        url,
+        azure_openai_responses_url(),
         data=body,
         headers={
             "Content-Type": "application/json",
@@ -187,13 +248,12 @@ def materialize_opencode_config(root: Path) -> Path:
     """Write the session-local OpenCode config and config directory."""
     config_dir = root / "opencode-config"
     project_dir = root / "workspace"
-    local_opencode_dir = project_dir / ".opencode"
     for path in (
         config_dir,
         config_dir / "agent",
         config_dir / "command",
         config_dir / "plugin",
-        local_opencode_dir,
+        project_dir / ".opencode",
         root / "home",
         root / "xdg-config",
         root / "xdg-data",
@@ -242,7 +302,7 @@ def materialize_opencode_config(root: Path) -> Path:
         },
     }
     config_path = project_dir / "opencode.json"
-    write_json(config_path, config)
+    _write_json(config_path, config)
     return config_path
 
 
@@ -275,7 +335,6 @@ def azure_openai_base_url() -> str:
     path = parsed.path.rstrip("/")
     if parsed.netloc.endswith(".openai.azure.com") and not path.endswith("/openai"):
         path = f"{path}/openai" if path else "/openai"
-
     return urlunparse((parsed.scheme, parsed.netloc, path, "", "", ""))
 
 
@@ -304,3 +363,10 @@ def azure_openai_resource_name() -> str:
 
     host = urlparse(endpoint).netloc
     return host.split(".", maxsplit=1)[0]
+
+
+def _write_json(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as output:
+        json.dump(value, output, indent=2, sort_keys=True)
+        output.write("\n")

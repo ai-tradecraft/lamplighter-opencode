@@ -20,6 +20,7 @@ classifiers = [
 ]
 license = {text = "MIT"}
 dependencies = [
+  "jsonschema",
   "typer",
   "rich",
 ]

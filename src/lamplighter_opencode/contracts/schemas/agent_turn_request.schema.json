@@ -1,14 +1,53 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tradecraft.local/schemas/lamplighter/agent_turn_request.schema.json",
   "title": "AgentTurnRequest",
   "type": "object",
+  "additionalProperties": false,
   "required": ["id", "agent_session_id", "type", "instruction"],
   "properties": {
-    "id": { "type": "string", "minLength": 1 },
-    "agent_session_id": { "type": "string", "minLength": 1 },
-    "type": { "const": "prompt_response" },
-    "instruction": { "type": "string", "minLength": 1 },
-    "correlation_id": { "type": ["string", "null"] }
-  },
-  "additionalProperties": true
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "agent_session_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "type": {
+      "const": "prompt_response"
+    },
+    "created_at": {
+      "type": "string",
+      "minLength": 1
+    },
+    "instruction": {
+      "type": "string",
+      "minLength": 1
+    },
+    "input_artifact_refs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "allowed_paths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "expected_artifacts": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "correlation_id": {
+      "type": ["string", "null"]
+    },
+    "timeout_policy": {
+      "type": "object"
+    }
+  }
 }

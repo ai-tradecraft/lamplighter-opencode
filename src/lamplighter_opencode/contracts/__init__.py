@@ -1,11 +1,22 @@
-"""Stable JSON contracts for Lamplighter OpenCode sessions."""
+"""Public contract models and validation helpers for Lamplighter."""
 
-from .models import AgentSessionSpec, AgentTurnRequest, AgentTurnResult, FailureReport, RuntimeEvent
+from lamplighter_opencode.contracts.models import (
+    AgentSessionSpec,
+    AgentTurnRequest,
+    AgentTurnResult,
+    OpenCodeBackendConfig,
+    OpenCodeServerConfig,
+    RuntimeEvent,
+)
+from lamplighter_opencode.contracts.validation import ContractValidationError, validate_contract
 
 __all__ = [
     "AgentSessionSpec",
     "AgentTurnRequest",
     "AgentTurnResult",
-    "FailureReport",
+    "ContractValidationError",
+    "OpenCodeBackendConfig",
+    "OpenCodeServerConfig",
     "RuntimeEvent",
+    "validate_contract",
 ]
