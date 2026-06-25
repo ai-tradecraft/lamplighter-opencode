@@ -64,5 +64,5 @@ def test_real_backend_returns_deterministic_date(tmp_path) -> None:
     assert submit.exit_code == 0, submit.stdout
 
     result = json.loads(submit.stdout)
-    assert result["status"] == "completed"
+    assert result["status"] == "completed", result
     assert result["message"].strip() == expected_date

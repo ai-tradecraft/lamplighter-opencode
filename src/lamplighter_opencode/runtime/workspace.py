@@ -7,6 +7,7 @@ import subprocess
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from lamplighter_opencode.contracts.io import write_json
 from lamplighter_opencode.contracts.models import AgentSessionSpec, AgentTurnRequest, AgentTurnResult, FailureReport
@@ -27,6 +28,7 @@ def prepare_session(spec: AgentSessionSpec) -> dict[str, object]:
         path.mkdir(parents=True, exist_ok=True)
 
     write_json(root / "session.json", spec.to_dict())
+    materialize_opencode_config(root)
     return {
         "agent_session_id": spec.agent_session_id,
         "status": "ready",
@@ -48,14 +50,25 @@ def submit_turn(request: AgentTurnRequest, root: Path) -> AgentTurnResult:
             commands_observed=[],
         )
 
+    model = opencode_model()
     try:
         completed = subprocess.run(
-            ["opencode", "run", request.instruction],
+            [
+                "opencode",
+                "run",
+                "--pure",
+                "--dir",
+                str(root / "workspace"),
+                "--model",
+                model,
+                request.instruction,
+            ],
             cwd=root / "workspace",
             check=False,
             capture_output=True,
             text=True,
             timeout=300,
+            env=isolated_opencode_environment(root),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return AgentTurnResult(
@@ -74,7 +87,7 @@ def submit_turn(request: AgentTurnRequest, root: Path) -> AgentTurnResult:
             request_id=request.id,
             status="failed",
             message=completed.stdout.strip() or "OpenCode returned a non-zero exit code.",
-            commands_observed=["opencode run"],
+            commands_observed=[f"opencode run --pure --dir <workspace> --model {model}"],
             failure_report=FailureReport(
                 summary="OpenCode returned a non-zero exit code.", detail=completed.stderr[-4000:]
             ),
@@ -86,7 +99,7 @@ def submit_turn(request: AgentTurnRequest, root: Path) -> AgentTurnResult:
         request_id=request.id,
         status="completed",
         message=completed.stdout.strip(),
-        commands_observed=["opencode run"],
+        commands_observed=[f"opencode run --pure --dir <workspace> --model {model}"],
     )
 
 
@@ -105,3 +118,87 @@ def deterministic_date_prompt(expected_date: str | None = None) -> str:
         "This is a deterministic integration test. "
         f"Return exactly this date in YYYY-MM-DD format and no other text: {expected}"
     )
+
+
+def opencode_model() -> str:
+    """Return the explicit model id the harness will allow OpenCode to use."""
+    deployment = os.environ.get("AZURE_OPENAI_DEPLOYMENT")
+    if not deployment:
+        raise ValueError("AZURE_OPENAI_DEPLOYMENT is required for the real OpenCode backend.")
+    return f"azure/{deployment}"
+
+
+def materialize_opencode_config(root: Path) -> Path:
+    """Write the session-local OpenCode config and config directory."""
+    config_dir = root / "opencode-config"
+    project_dir = root / "workspace"
+    local_opencode_dir = project_dir / ".opencode"
+    for path in (
+        config_dir,
+        config_dir / "agent",
+        config_dir / "command",
+        config_dir / "plugin",
+        local_opencode_dir,
+        root / "home",
+        root / "xdg-config",
+        root / "xdg-data",
+        root / "xdg-cache",
+    ):
+        path.mkdir(parents=True, exist_ok=True)
+
+    deployment = os.environ.get("AZURE_OPENAI_DEPLOYMENT") or "deployment"
+    config: dict[str, Any] = {
+        "$schema": "https://opencode.ai/config.json",
+        "model": f"azure/{deployment}",
+        "small_model": f"azure/{deployment}",
+        "autoupdate": False,
+        "share": "disabled",
+        "enabled_providers": ["azure"],
+        "provider": {
+            "azure": {
+                "options": {
+                    "apiKey": "{env:AZURE_OPENAI_API_KEY}",
+                    "baseURL": "{env:AZURE_OPENAI_ENDPOINT}",
+                },
+                "models": {
+                    deployment: {
+                        "name": deployment,
+                        "modalities": {
+                            "input": ["text"],
+                            "output": ["text"],
+                        },
+                    },
+                },
+            },
+        },
+        "mcp": {},
+        "plugin": [],
+        "instructions": [],
+        "permission": {
+            "bash": "deny",
+            "edit": "deny",
+            "write": "deny",
+        },
+    }
+    config_path = project_dir / "opencode.json"
+    write_json(config_path, config)
+    return config_path
+
+
+def isolated_opencode_environment(root: Path) -> dict[str, str]:
+    """Build an environment that prevents OpenCode from reading user-global state."""
+    config_path = root / "workspace" / "opencode.json"
+    config_dir = root / "opencode-config"
+    env = os.environ.copy()
+    env.update(
+        {
+            "HOME": str(root / "home"),
+            "XDG_CONFIG_HOME": str(root / "xdg-config"),
+            "XDG_DATA_HOME": str(root / "xdg-data"),
+            "XDG_CACHE_HOME": str(root / "xdg-cache"),
+            "OPENCODE_CONFIG": str(config_path),
+            "OPENCODE_CONFIG_DIR": str(config_dir),
+            "OPENCODE_DISABLE_AUTOUPDATE": "1",
+        }
+    )
+    return env

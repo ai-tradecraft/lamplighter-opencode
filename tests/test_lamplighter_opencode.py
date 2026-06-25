@@ -7,6 +7,7 @@ from typer.testing import CliRunner
 import lamplighter_opencode
 from lamplighter_opencode.cli import app
 from lamplighter_opencode.contracts.models import AgentSessionSpec, AgentTurnRequest
+from lamplighter_opencode.runtime.workspace import isolated_opencode_environment, materialize_opencode_config
 
 runner = CliRunner()
 
@@ -99,3 +100,20 @@ def test_submit_turn_command_returns_fake_result(tmp_path) -> None:
 
     assert result.exit_code == 0
     assert "Fake OpenCode response" in result.stdout
+
+
+def test_opencode_environment_is_session_local(tmp_path) -> None:
+    """Real backend execution does not inherit the user's global OpenCode home."""
+    root = tmp_path / "session_1"
+    (root / "workspace").mkdir(parents=True)
+
+    config_path = materialize_opencode_config(root)
+    env = isolated_opencode_environment(root)
+
+    assert config_path == root / "workspace" / "opencode.json"
+    assert env["HOME"] == str(root / "home")
+    assert env["XDG_CONFIG_HOME"] == str(root / "xdg-config")
+    assert env["XDG_DATA_HOME"] == str(root / "xdg-data")
+    assert env["XDG_CACHE_HOME"] == str(root / "xdg-cache")
+    assert env["OPENCODE_CONFIG"] == str(config_path)
+    assert env["OPENCODE_CONFIG_DIR"] == str(root / "opencode-config")
