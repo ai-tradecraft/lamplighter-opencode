@@ -1,13 +1,20 @@
 """Tests for `lamplighter_opencode` package."""
 
 import json
+import subprocess
 
 from typer.testing import CliRunner
 
 import lamplighter_opencode
 from lamplighter_opencode.cli import app
 from lamplighter_opencode.contracts.models import AgentSessionSpec, AgentTurnRequest
-from lamplighter_opencode.runtime.workspace import isolated_opencode_environment, materialize_opencode_config
+from lamplighter_opencode.runtime.workspace import (
+    azure_openai_base_url,
+    azure_openai_resource_name,
+    isolated_opencode_environment,
+    materialize_opencode_config,
+    submit_turn,
+)
 
 runner = CliRunner()
 
@@ -117,3 +124,39 @@ def test_opencode_environment_is_session_local(tmp_path) -> None:
     assert env["XDG_CACHE_HOME"] == str(root / "xdg-cache")
     assert env["OPENCODE_CONFIG"] == str(config_path)
     assert env["OPENCODE_CONFIG_DIR"] == str(root / "opencode-config")
+
+
+def test_azure_openai_endpoint_is_normalized(monkeypatch) -> None:
+    """Azure resource root endpoints are normalized to the OpenCode base path."""
+    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://example-resource.openai.azure.com/")
+
+    assert azure_openai_base_url() == "https://example-resource.openai.azure.com/openai"
+    assert azure_openai_resource_name() == "example-resource"
+
+
+def test_submit_turn_returns_failure_response_for_backend_error(tmp_path, monkeypatch) -> None:
+    """A non-zero OpenCode process becomes a normalized failed AgentTurnResult."""
+    root = tmp_path / "session_1"
+    (root / "workspace").mkdir(parents=True)
+    request = AgentTurnRequest(
+        id="turn_1",
+        agent_session_id="session_1",
+        type="prompt_response",
+        instruction="hello",
+    )
+
+    def fake_run(*args, **kwargs):  # noqa: ANN002, ANN003
+        return subprocess.CompletedProcess(args=args, returncode=1, stdout="", stderr="Resource not found")
+
+    monkeypatch.setenv("LAMPLIGHTER_OPENCODE_USE_REAL_BACKEND", "1")
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "test-api-key")
+    monkeypatch.setenv("AZURE_OPENAI_DEPLOYMENT", "deployment")
+    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://example-resource.openai.azure.com/")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = submit_turn(request, root)
+
+    assert result.status == "failed"
+    assert result.failure_report is not None
+    assert result.failure_report.summary == "OpenCode returned a non-zero exit code."
+    assert "Resource not found" in (result.failure_report.detail or "")

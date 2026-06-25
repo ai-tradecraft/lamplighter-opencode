@@ -8,6 +8,7 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse, urlunparse
 
 from lamplighter_opencode.contracts.io import write_json
 from lamplighter_opencode.contracts.models import AgentSessionSpec, AgentTurnRequest, AgentTurnResult, FailureReport
@@ -50,6 +51,8 @@ def submit_turn(request: AgentTurnRequest, root: Path) -> AgentTurnResult:
             commands_observed=[],
         )
 
+    validate_real_backend_environment()
+    materialize_opencode_config(root)
     model = opencode_model()
     try:
         completed = subprocess.run(
@@ -128,6 +131,17 @@ def opencode_model() -> str:
     return f"azure/{deployment}"
 
 
+def validate_real_backend_environment() -> None:
+    """Validate the environment required for a real OpenCode backend turn."""
+    missing = [
+        name
+        for name in ("AZURE_OPENAI_API_KEY", "AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_DEPLOYMENT")
+        if not os.environ.get(name)
+    ]
+    if missing:
+        raise ValueError(f"Missing required real backend environment variables: {', '.join(missing)}")
+
+
 def materialize_opencode_config(root: Path) -> Path:
     """Write the session-local OpenCode config and config directory."""
     config_dir = root / "opencode-config"
@@ -147,6 +161,15 @@ def materialize_opencode_config(root: Path) -> Path:
         path.mkdir(parents=True, exist_ok=True)
 
     deployment = os.environ.get("AZURE_OPENAI_DEPLOYMENT") or "deployment"
+    options: dict[str, Any] = {
+        "apiKey": "{env:AZURE_OPENAI_API_KEY}",
+        "baseURL": azure_openai_base_url()
+        if os.environ.get("AZURE_OPENAI_ENDPOINT")
+        else "{env:AZURE_OPENAI_ENDPOINT}",
+    }
+    if os.environ.get("AZURE_OPENAI_ENDPOINT"):
+        options["resourceName"] = azure_openai_resource_name()
+
     config: dict[str, Any] = {
         "$schema": "https://opencode.ai/config.json",
         "model": f"azure/{deployment}",
@@ -156,10 +179,7 @@ def materialize_opencode_config(root: Path) -> Path:
         "enabled_providers": ["azure"],
         "provider": {
             "azure": {
-                "options": {
-                    "apiKey": "{env:AZURE_OPENAI_API_KEY}",
-                    "baseURL": "{env:AZURE_OPENAI_ENDPOINT}",
-                },
+                "options": options,
                 "models": {
                     deployment: {
                         "name": deployment,
@@ -202,3 +222,31 @@ def isolated_opencode_environment(root: Path) -> dict[str, str]:
         }
     )
     return env
+
+
+def azure_openai_base_url() -> str:
+    """Return the Azure OpenAI base URL shape expected by OpenCode."""
+    endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT")
+    if not endpoint:
+        raise ValueError("AZURE_OPENAI_ENDPOINT is required for the real OpenCode backend.")
+
+    parsed = urlparse(endpoint)
+    path = parsed.path.rstrip("/")
+    if parsed.netloc.endswith(".openai.azure.com") and not path.endswith("/openai"):
+        path = f"{path}/openai" if path else "/openai"
+
+    return urlunparse((parsed.scheme, parsed.netloc, path, "", "", ""))
+
+
+def azure_openai_resource_name() -> str:
+    """Return the Azure OpenAI resource name for the configured endpoint."""
+    explicit = os.environ.get("AZURE_OPENAI_RESOURCE_NAME")
+    if explicit:
+        return explicit
+
+    endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT")
+    if not endpoint:
+        raise ValueError("AZURE_OPENAI_ENDPOINT is required for the real OpenCode backend.")
+
+    host = urlparse(endpoint).netloc
+    return host.split(".", maxsplit=1)[0]
