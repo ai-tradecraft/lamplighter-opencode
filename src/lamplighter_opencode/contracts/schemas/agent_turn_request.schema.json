@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AgentTurnRequest",
+  "type": "object",
+  "required": ["id", "agent_session_id", "type", "instruction"],
+  "properties": {
+    "id": { "type": "string", "minLength": 1 },
+    "agent_session_id": { "type": "string", "minLength": 1 },
+    "type": { "const": "prompt_response" },
+    "instruction": { "type": "string", "minLength": 1 },
+    "correlation_id": { "type": ["string", "null"] }
+  },
+  "additionalProperties": true
+}

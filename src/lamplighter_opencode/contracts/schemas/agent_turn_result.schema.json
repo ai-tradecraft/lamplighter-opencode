@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AgentTurnResult",
+  "type": "object",
+  "required": ["id", "agent_session_id", "request_id", "status", "message"],
+  "properties": {
+    "id": { "type": "string", "minLength": 1 },
+    "agent_session_id": { "type": "string", "minLength": 1 },
+    "request_id": { "type": "string", "minLength": 1 },
+    "status": { "type": "string", "minLength": 1 },
+    "message": { "type": "string" },
+    "artifact_refs": { "type": "array", "items": { "type": "string" } },
+    "changed_files": { "type": "array", "items": { "type": "string" } },
+    "commands_observed": { "type": "array", "items": { "type": "string" } },
+    "failure_report": {
+      "type": ["object", "null"],
+      "properties": {
+        "summary": { "type": "string" },
+        "detail": { "type": ["string", "null"] }
+      }
+    }
+  },
+  "additionalProperties": true
+}

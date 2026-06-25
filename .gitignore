@@ -463,3 +463,12 @@ logs/
 # Lock files (keep language-specific ones if desired)
 # package-lock.json  # uncomment to ignore npm lock file
 # yarn.lock          # uncomment to ignore Yarn lock file
+
+# POC runtime/build output
+poc/chat-through-harness/.agent-runtime/
+poc/chat-through-harness/**/.agent-runtime/
+poc/chat-through-harness/client/node_modules/
+poc/chat-through-harness/client/dist/
+poc/chat-through-harness/client/*.tsbuildinfo
+poc/chat-through-harness/**/bin/
+poc/chat-through-harness/**/obj/

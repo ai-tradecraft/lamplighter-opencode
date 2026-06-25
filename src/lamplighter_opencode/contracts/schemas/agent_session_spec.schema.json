@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AgentSessionSpec",
+  "type": "object",
+  "required": [
+    "agent_session_id",
+    "goal_run_id",
+    "phase_run_id",
+    "agent_definition_id",
+    "workspace_ref",
+    "repo_ref",
+    "branch_name"
+  ],
+  "properties": {
+    "agent_session_id": { "type": "string", "minLength": 1 },
+    "goal_run_id": { "type": "string", "minLength": 1 },
+    "phase_run_id": { "type": "string", "minLength": 1 },
+    "agent_definition_id": { "type": "string", "minLength": 1 },
+    "workspace_ref": { "type": "string", "minLength": 1 },
+    "repo_ref": { "type": "string", "minLength": 1 },
+    "branch_name": { "type": "string", "minLength": 1 },
+    "backend": { "type": "object" },
+    "communication_channel": { "type": "object" },
+    "artifact_contract": { "type": "object" },
+    "timeout_policy": { "type": "object" }
+  },
+  "additionalProperties": true
+}
