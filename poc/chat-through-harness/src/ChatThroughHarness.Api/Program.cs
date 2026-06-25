@@ -134,7 +134,7 @@ app.MapGet("/api/runner/content/{contentId}", async (
 app.MapPost("/api/agent-sessions", async (
     CreateAgentSessionRequest request,
     AgentSessionStore store,
-    IHarnessClient harness,
+    RunnerControlStore runnerStore,
     IHubContext<AgentSessionHub> hub,
     CancellationToken cancellationToken) =>
 {
@@ -142,32 +142,18 @@ app.MapPost("/api/agent-sessions", async (
     await store.UpsertSessionAsync(session, cancellationToken);
     await PublishAsync(store, hub, session.Id, null, "agent_session.preparing", new { session.Id }, cancellationToken);
 
-    try
-    {
-        var prepared = await harness.PrepareSessionAsync(session, cancellationToken);
-        session = session with
-        {
-            Status = "ready",
-            ReadyAt = DateTimeOffset.UtcNow,
-            Diagnostics = prepared.Diagnostics
-        };
-        await store.UpsertSessionAsync(session, cancellationToken);
-        await PublishAsync(store, hub, session.Id, null, "agent_session.ready", session, cancellationToken);
-        return Results.Created($"/api/agent-sessions/{session.Id}", session);
-    }
-    catch (HarnessException ex)
-    {
-        session = session with
-        {
-            Status = "failed",
-            FailedAt = DateTimeOffset.UtcNow,
-            Diagnostics = ex.Diagnostics,
-            FailureSummary = ex.Message
-        };
-        await store.UpsertSessionAsync(session, cancellationToken);
-        await PublishAsync(store, hub, session.Id, null, "agent_session.failed", session, cancellationToken);
-        return Results.Problem(ex.Message, statusCode: StatusCodes.Status502BadGateway);
-    }
+    var spec = AgentSessionSpec.FromSession(session);
+    var payloadRef = await runnerStore.SaveJsonContentAsync(spec, "application/vnd.tradecraft.agent-session-spec+json", cancellationToken);
+    var command = RunnerCommandFactory.Create(
+        session.Id,
+        RunnerCommandTypes.PrepareAgentSession,
+        payloadRef,
+        correlationId: session.Id,
+        idempotencyKey: session.Id);
+    await runnerStore.EnqueueCommandAsync(command, cancellationToken);
+    await PublishAsync(store, hub, session.Id, null, "agent_session.command_queued", command, cancellationToken);
+
+    return Results.Created($"/api/agent-sessions/{session.Id}", session);
 });
 
 app.MapGet("/api/agent-sessions/{sessionId}", async (string sessionId, AgentSessionStore store, CancellationToken cancellationToken) =>
@@ -180,7 +166,7 @@ app.MapPost("/api/agent-sessions/{sessionId}/turns", async (
     string sessionId,
     SubmitTurnRequest request,
     AgentSessionStore store,
-    IHarnessClient harness,
+    RunnerControlStore runnerStore,
     IHubContext<AgentSessionHub> hub,
     CancellationToken cancellationToken) =>
 {
@@ -190,7 +176,7 @@ app.MapPost("/api/agent-sessions/{sessionId}/turns", async (
         return Results.NotFound();
     }
 
-    if (session.Status is "cancelled" or "failed")
+    if (session.Status is "cancelled" or "cancelling" or "failed")
     {
         return Results.BadRequest(new { message = $"Session is {session.Status}." });
     }
@@ -199,34 +185,18 @@ app.MapPost("/api/agent-sessions/{sessionId}/turns", async (
     await store.UpsertTurnAsync(turn, cancellationToken);
     await PublishAsync(store, hub, sessionId, turn.Id, "agent_turn.submitted", turn, cancellationToken);
 
-    try
-    {
-        var result = await harness.SubmitTurnAsync(session, turn, cancellationToken);
-        turn = turn with
-        {
-            Status = result.Status,
-            CompletedAt = DateTimeOffset.UtcNow,
-            Response = result.Message,
-            Diagnostics = result.Diagnostics,
-            FailureSummary = result.FailureReport?.Summary
-        };
-        await store.UpsertTurnAsync(turn, cancellationToken);
-        await PublishAsync(store, hub, sessionId, turn.Id, "agent_turn.completed", turn, cancellationToken);
-        return Results.Created($"/api/agent-sessions/{sessionId}/turns/{turn.Id}", turn);
-    }
-    catch (HarnessException ex)
-    {
-        turn = turn with
-        {
-            Status = "failed",
-            CompletedAt = DateTimeOffset.UtcNow,
-            Diagnostics = ex.Diagnostics,
-            FailureSummary = ex.Message
-        };
-        await store.UpsertTurnAsync(turn, cancellationToken);
-        await PublishAsync(store, hub, sessionId, turn.Id, "agent_turn.failed", turn, cancellationToken);
-        return Results.Problem(ex.Message, statusCode: StatusCodes.Status502BadGateway);
-    }
+    var turnRequest = AgentTurnRequest.FromTurn(turn);
+    var payloadRef = await runnerStore.SaveJsonContentAsync(turnRequest, "application/vnd.tradecraft.agent-turn-request+json", cancellationToken);
+    var command = RunnerCommandFactory.Create(
+        sessionId,
+        RunnerCommandTypes.SubmitAgentTurn,
+        payloadRef,
+        correlationId: turn.Id,
+        idempotencyKey: turn.Id);
+    await runnerStore.EnqueueCommandAsync(command, cancellationToken);
+    await PublishAsync(store, hub, sessionId, turn.Id, "agent_turn.command_queued", command, cancellationToken);
+
+    return Results.Created($"/api/agent-sessions/{sessionId}/turns/{turn.Id}", turn);
 });
 
 app.MapGet("/api/agent-sessions/{sessionId}/turns/{turnId}", async (
@@ -252,7 +222,7 @@ app.MapPost("/api/agent-sessions/{sessionId}/cancel", async (
     string sessionId,
     CancelSessionRequest request,
     AgentSessionStore store,
-    IHarnessClient harness,
+    RunnerControlStore runnerStore,
     IHubContext<AgentSessionHub> hub,
     CancellationToken cancellationToken) =>
 {
@@ -262,10 +232,18 @@ app.MapPost("/api/agent-sessions/{sessionId}/cancel", async (
         return Results.NotFound();
     }
 
-    await harness.CancelSessionAsync(session, request.Reason ?? "Cancelled by operator.", cancellationToken);
-    session = session with { Status = "cancelled", EndedAt = DateTimeOffset.UtcNow };
+    var payload = new { reason = request.Reason ?? "Cancelled by operator." };
+    var payloadRef = await runnerStore.SaveJsonContentAsync(payload, "application/vnd.tradecraft.agent-session-cancel+json", cancellationToken);
+    var command = RunnerCommandFactory.Create(
+        sessionId,
+        RunnerCommandTypes.CancelAgentSession,
+        payloadRef,
+        correlationId: sessionId,
+        idempotencyKey: $"cancel:{sessionId}");
+    await runnerStore.EnqueueCommandAsync(command, cancellationToken);
+    session = session with { Status = "cancelling", EndedAt = DateTimeOffset.UtcNow };
     await store.UpsertSessionAsync(session, cancellationToken);
-    await PublishAsync(store, hub, sessionId, null, "agent_session.cancelled", session, cancellationToken);
+    await PublishAsync(store, hub, sessionId, null, "agent_session.cancel_command_queued", command, cancellationToken);
     return Results.Ok(session);
 });
 
@@ -670,6 +648,22 @@ public sealed class RunnerControlStore
         return new ClaimCheckContentUploadResponse(contentRef);
     }
 
+    public async Task<ClaimCheckContentRef> SaveJsonContentAsync<T>(
+        T value,
+        string contentType,
+        CancellationToken cancellationToken)
+    {
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(value, RunnerProtocolJson.Options);
+        var sha = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+        var upload = new ClaimCheckContentUploadRequest(
+            ContentType: contentType,
+            Sha256: sha,
+            Length: bytes.LongLength,
+            ContentBase64: Convert.ToBase64String(bytes));
+        var response = await SaveContentAsync(upload, cancellationToken);
+        return response.ContentRef;
+    }
+
     public async Task<StoredClaimCheckContent?> GetContentAsync(string contentId, CancellationToken cancellationToken)
     {
         if (_content.TryGetValue(contentId, out var content))
@@ -841,6 +835,31 @@ public static class JsonDefaults
 public static class Ids
 {
     public static string New(string prefix) => $"{prefix}_{Guid.NewGuid():N}";
+}
+
+public static class RunnerCommandFactory
+{
+    public static RunnerCommandEnvelope Create(
+        string agentSessionId,
+        string type,
+        ClaimCheckContentRef payloadRef,
+        string correlationId,
+        string idempotencyKey)
+    {
+        var now = DateTimeOffset.UtcNow;
+        return new RunnerCommandEnvelope(
+            Id: Ids.New("cmd"),
+            RunnerId: null,
+            AgentSessionId: agentSessionId,
+            Type: type,
+            Status: RunnerCommandStatuses.Pending,
+            PayloadRef: payloadRef,
+            CorrelationId: correlationId,
+            IdempotencyKey: idempotencyKey,
+            CreatedAt: now,
+            AvailableAt: now,
+            Lease: null);
+    }
 }
 
 public sealed record CreateAgentSessionRequest(string? Goal = null, string? BranchName = null);
