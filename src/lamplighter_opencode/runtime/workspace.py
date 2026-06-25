@@ -18,6 +18,8 @@ from lamplighter_opencode.contracts.models import AgentSessionSpec, AgentTurnReq
 from lamplighter_opencode.contracts.validation import validate_contract
 from lamplighter_opencode.runtime.events import append_runtime_event
 
+OPENCODE_CONFIG_MODES = {"inherit-global", "project-only", "managed"}
+
 
 @dataclass(frozen=True)
 class SessionWorkspace:
@@ -76,7 +78,8 @@ def materialize_session_workspace(
     _write_json(workspace.context_path, spec.context_package)
     _write_json(workspace.session_path, spec_value)
     _write_json(workspace.backend_config_path, spec.backend.to_dict())
-    materialize_opencode_config(workspace.root)
+    if opencode_config_mode() != "inherit-global":
+        materialize_opencode_config(workspace.root)
 
     append_runtime_event(
         workspace.events_path,
@@ -107,19 +110,11 @@ def submit_turn(request: AgentTurnRequest, root: Path) -> AgentTurnResult:
             message=f"Fake OpenCode response for `{request.instruction}`.",
         )
 
-    validate_real_backend_environment()
-    materialize_opencode_config(root)
-    model = opencode_model()
-    command = [
-        "opencode",
-        "run",
-        "--pure",
-        "--dir",
-        str(root / "workspace"),
-        "--model",
-        model,
-        request.instruction,
-    ]
+    mode = opencode_config_mode()
+    if mode != "inherit-global":
+        validate_real_backend_environment()
+        materialize_opencode_config(root)
+    command, observed_command = opencode_run_command(root, request.instruction, mode)
     try:
         completed = subprocess.run(
             command,
@@ -128,7 +123,7 @@ def submit_turn(request: AgentTurnRequest, root: Path) -> AgentTurnResult:
             capture_output=True,
             text=True,
             timeout=300,
-            env=isolated_opencode_environment(root),
+            env=opencode_environment(root, mode),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return AgentTurnResult(
@@ -142,7 +137,7 @@ def submit_turn(request: AgentTurnRequest, root: Path) -> AgentTurnResult:
             failure_report={"summary": "OpenCode invocation failed.", "detail": str(exc)},
         )
 
-    observed = [f"opencode run --pure --dir <workspace> --model {model}"]
+    observed = [observed_command]
     if completed.returncode != 0:
         return AgentTurnResult(
             id=f"result_{uuid.uuid4().hex}",
@@ -177,6 +172,49 @@ def real_backend_enabled() -> bool:
         os.environ.get("LAMPLIGHTER_OPENCODE_USE_REAL_BACKEND") == "1"
         or os.environ.get("LAMPLIGHTER_OPENCODE_USE_REAL") == "1"
     )
+
+
+def opencode_config_mode() -> str:
+    """Return how OpenCode should resolve configuration for this run."""
+    mode = os.environ.get("LAMPLIGHTER_OPENCODE_CONFIG_MODE", "inherit-global").strip().lower()
+    if mode not in OPENCODE_CONFIG_MODES:
+        allowed = ", ".join(sorted(OPENCODE_CONFIG_MODES))
+        raise ValueError(f"Unsupported LAMPLIGHTER_OPENCODE_CONFIG_MODE={mode!r}. Expected one of: {allowed}.")
+    return mode
+
+
+def opencode_run_command(root: Path, instruction: str, mode: str | None = None) -> tuple[list[str], str]:
+    """Build the OpenCode command for the selected configuration mode."""
+    selected_mode = mode or opencode_config_mode()
+    command = ["opencode", "run"]
+    observed_parts = ["opencode run"]
+
+    if selected_mode != "inherit-global":
+        model = opencode_model()
+        command.extend(["--pure", "--dir", str(root / "workspace"), "--model", model])
+        observed_parts.extend(["--pure", "--dir <workspace>", f"--model {model}"])
+    else:
+        command.extend(["--dir", str(root / "workspace")])
+        observed_parts.append("--dir <workspace>")
+        model = inherited_opencode_model()
+        if model:
+            command.extend(["--model", model])
+            observed_parts.append(f"--model {model}")
+
+    command.append(instruction)
+    return command, " ".join(observed_parts)
+
+
+def inherited_opencode_model() -> str | None:
+    """Return an optional model override while allowing global OpenCode defaults."""
+    explicit = os.environ.get("LAMPLIGHTER_OPENCODE_MODEL") or os.environ.get("OPENCODE_MODEL")
+    if explicit:
+        return explicit
+
+    deployment = os.environ.get("AZURE_OPENAI_DEPLOYMENT")
+    if deployment:
+        return f"azure/{deployment}"
+    return None
 
 
 def deterministic_date_prompt(expected_date: str | None = None) -> str:
@@ -307,7 +345,7 @@ def materialize_opencode_config(root: Path) -> Path:
 
 
 def isolated_opencode_environment(root: Path) -> dict[str, str]:
-    """Build an environment that prevents OpenCode from reading user-global state."""
+    """Build a project-only environment that prevents reading user-global state."""
     config_path = root / "workspace" / "opencode.json"
     config_dir = root / "opencode-config"
     env = os.environ.copy()
@@ -323,6 +361,16 @@ def isolated_opencode_environment(root: Path) -> dict[str, str]:
         }
     )
     return env
+
+
+def opencode_environment(root: Path, mode: str | None = None) -> dict[str, str]:
+    """Build the OpenCode process environment for the selected configuration mode."""
+    selected_mode = mode or opencode_config_mode()
+    if selected_mode == "inherit-global":
+        env = os.environ.copy()
+        env["OPENCODE_DISABLE_AUTOUPDATE"] = "1"
+        return env
+    return isolated_opencode_environment(root)
 
 
 def azure_openai_base_url() -> str:

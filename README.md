@@ -52,8 +52,8 @@ for a fresh clone.
 
 The end-to-end ASP.NET + React POC lives in
 [`poc/chat-through-harness`](poc/chat-through-harness/README.md). Its README
-documents local `.env` usage, production secret injection expectations, and how
-the harness isolates OpenCode from user-global configuration.
+documents local `.env` usage, production secret injection expectations, and the
+OpenCode configuration modes used for local and deterministic runs.
 
 ### Running the CLI
 

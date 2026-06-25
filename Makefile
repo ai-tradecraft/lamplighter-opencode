@@ -131,7 +131,9 @@ qa: check-uv ## Run the Python checks (ruff format check, ruff lint, ty, pytest)
 
 test-real-backend: check-uv ## Run the opt-in real OpenCode backend integration test
 	@if [ -f .env ]; then set -a; . ./.env; set +a; fi; \
-	LAMPLIGHTER_OPENCODE_USE_REAL_BACKEND=1 uv run pytest -m integration tests/test_real_backend_e2e.py
+	LAMPLIGHTER_OPENCODE_USE_REAL_BACKEND=1 \
+	LAMPLIGHTER_OPENCODE_CONFIG_MODE=project-only \
+	uv run pytest -m integration tests/test_real_backend_e2e.py
 
 print-real-backend-fingerprint: check-uv ## Print non-secret fingerprints of real backend env values
 	@if [ -f .env ]; then set -a; . ./.env; set +a; fi; \

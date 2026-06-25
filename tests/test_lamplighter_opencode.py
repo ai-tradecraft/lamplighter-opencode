@@ -14,6 +14,9 @@ from lamplighter_opencode.runtime.workspace import (
     azure_openai_responses_url,
     isolated_opencode_environment,
     materialize_opencode_config,
+    opencode_config_mode,
+    opencode_environment,
+    opencode_run_command,
     submit_turn,
 )
 
@@ -87,6 +90,33 @@ def test_prepare_session_command(tmp_path) -> None:
     assert result.exit_code == 0
     assert workspace.exists()
     assert (workspace.parent / "session.json").exists()
+    assert not (workspace / "opencode.json").exists()
+
+
+def test_prepare_session_project_only_writes_opencode_config(tmp_path, monkeypatch) -> None:
+    """project-only prepare-session writes the harness-owned OpenCode config."""
+    monkeypatch.setenv("LAMPLIGHTER_OPENCODE_CONFIG_MODE", "project-only")
+    spec_path = tmp_path / "spec.json"
+    workspace = tmp_path / ".agent-runtime" / "sessions" / "session_1" / "workspace"
+    spec_path.write_text(
+        json.dumps(
+            {
+                "agent_session_id": "session_1",
+                "goal_run_id": "goal_1",
+                "phase_run_id": "phase_1",
+                "agent_definition_id": "opencode.default",
+                "workspace_ref": str(workspace),
+                "repo_ref": "lamplighter-opencode",
+                "branch_name": "poc-chat-through-harness",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["prepare-session", "--spec", str(spec_path), "--json"])
+
+    assert result.exit_code == 0
+    assert (workspace / "opencode.json").exists()
 
 
 def test_submit_turn_command_returns_fake_result(tmp_path) -> None:
@@ -110,21 +140,50 @@ def test_submit_turn_command_returns_fake_result(tmp_path) -> None:
     assert "Fake OpenCode response" in result.stdout
 
 
-def test_opencode_environment_is_session_local(tmp_path) -> None:
-    """Real backend execution does not inherit the user's global OpenCode home."""
+def test_opencode_environment_inherits_global_config_by_default(tmp_path, monkeypatch) -> None:
+    """Local developer execution preserves the user's global OpenCode config."""
     root = tmp_path / "session_1"
     (root / "workspace").mkdir(parents=True)
+    monkeypatch.setenv("HOME", "/Users/local-dev")
+    monkeypatch.delenv("LAMPLIGHTER_OPENCODE_CONFIG_MODE", raising=False)
+    monkeypatch.delenv("AZURE_OPENAI_DEPLOYMENT", raising=False)
+
+    command, observed = opencode_run_command(root, "hello")
+    env = opencode_environment(root)
+
+    assert opencode_config_mode() == "inherit-global"
+    assert "--pure" not in command
+    assert "--model" not in command
+    assert observed == "opencode run --dir <workspace>"
+    assert env["HOME"] == "/Users/local-dev"
+    assert "OPENCODE_CONFIG" not in env
+    assert env["OPENCODE_DISABLE_AUTOUPDATE"] == "1"
+
+
+def test_project_only_opencode_environment_is_session_local(tmp_path, monkeypatch) -> None:
+    """Project-only execution does not inherit the user's global OpenCode home."""
+    root = tmp_path / "session_1"
+    (root / "workspace").mkdir(parents=True)
+    monkeypatch.setenv("LAMPLIGHTER_OPENCODE_CONFIG_MODE", "project-only")
+    monkeypatch.setenv("AZURE_OPENAI_DEPLOYMENT", "deployment")
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "test-api-key")
+    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://example-resource.openai.azure.com/")
 
     config_path = materialize_opencode_config(root)
-    env = isolated_opencode_environment(root)
+    command, observed = opencode_run_command(root, "hello")
+    env = opencode_environment(root)
 
     assert config_path == root / "workspace" / "opencode.json"
+    assert "--pure" in command
+    assert "--model" in command
+    assert observed == "opencode run --pure --dir <workspace> --model azure/deployment"
     assert env["HOME"] == str(root / "home")
     assert env["XDG_CONFIG_HOME"] == str(root / "xdg-config")
     assert env["XDG_DATA_HOME"] == str(root / "xdg-data")
     assert env["XDG_CACHE_HOME"] == str(root / "xdg-cache")
     assert env["OPENCODE_CONFIG"] == str(config_path)
     assert env["OPENCODE_CONFIG_DIR"] == str(root / "opencode-config")
+    assert isolated_opencode_environment(root)["HOME"] == str(root / "home")
 
 
 def test_azure_openai_endpoint_is_normalized(monkeypatch) -> None:
@@ -151,6 +210,7 @@ def test_submit_turn_returns_failure_response_for_backend_error(tmp_path, monkey
         return subprocess.CompletedProcess(args=args, returncode=1, stdout="", stderr="Resource not found")
 
     monkeypatch.setenv("LAMPLIGHTER_OPENCODE_USE_REAL_BACKEND", "1")
+    monkeypatch.setenv("LAMPLIGHTER_OPENCODE_CONFIG_MODE", "project-only")
     monkeypatch.setenv("AZURE_OPENAI_API_KEY", "test-api-key")
     monkeypatch.setenv("AZURE_OPENAI_DEPLOYMENT", "deployment")
     monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://example-resource.openai.azure.com/")
