@@ -85,6 +85,9 @@ exclude_also = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "integration: tests that call external services or real model backends",
+]
 
 [tool.uv]
 package = true

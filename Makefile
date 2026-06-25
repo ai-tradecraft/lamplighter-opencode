@@ -40,7 +40,7 @@ PRECOMMIT_PATH = $(if $(HOOK_PYTHON_BIN),$(HOOK_PYTHON_BIN):$(PATH),$(PATH))
 PRECOMMIT := uvx pre-commit
 JUST := uvx --from rust-just just
 
-.PHONY: help doctor install-deps setup ci lint qa check-uv
+.PHONY: help doctor install-deps setup ci lint qa test-real-backend check-uv
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
@@ -128,6 +128,10 @@ qa: check-uv ## Run the Python checks (ruff format check, ruff lint, ty, pytest)
 	uv run ruff check .
 	uv run ty check --output-format=concise .
 	uv run pytest
+
+test-real-backend: check-uv ## Run the opt-in real OpenCode backend integration test
+	@if [ -f .env ]; then set -a; . ./.env; set +a; fi; \
+	LAMPLIGHTER_OPENCODE_USE_REAL_BACKEND=1 uv run pytest -m integration tests/test_real_backend_e2e.py
 
 check-uv: ## Verify uv is installed (the only machine-level prerequisite)
 	@command -v uv > /dev/null || { \

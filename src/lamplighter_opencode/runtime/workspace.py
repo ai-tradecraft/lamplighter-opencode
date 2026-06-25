@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 
 from lamplighter_opencode.contracts.io import write_json
@@ -36,7 +37,7 @@ def prepare_session(spec: AgentSessionSpec) -> dict[str, object]:
 
 
 def submit_turn(request: AgentTurnRequest, root: Path) -> AgentTurnResult:
-    use_real = os.environ.get("LAMPLIGHTER_OPENCODE_USE_REAL") == "1"
+    use_real = real_backend_enabled()
     if not use_real:
         return AgentTurnResult(
             id=f"result_{uuid.uuid4().hex}",
@@ -86,4 +87,21 @@ def submit_turn(request: AgentTurnRequest, root: Path) -> AgentTurnResult:
         status="completed",
         message=completed.stdout.strip(),
         commands_observed=["opencode run"],
+    )
+
+
+def real_backend_enabled() -> bool:
+    """Return whether turns should invoke the real OpenCode backend."""
+    return (
+        os.environ.get("LAMPLIGHTER_OPENCODE_USE_REAL_BACKEND") == "1"
+        or os.environ.get("LAMPLIGHTER_OPENCODE_USE_REAL") == "1"
+    )
+
+
+def deterministic_date_prompt(expected_date: str | None = None) -> str:
+    """Build a prompt with an exact expected answer for real-backend smoke tests."""
+    expected = expected_date or datetime.now(UTC).date().isoformat()
+    return (
+        "This is a deterministic integration test. "
+        f"Return exactly this date in YYYY-MM-DD format and no other text: {expected}"
     )

@@ -39,7 +39,7 @@ def prepare_session(
         raise typer.BadParameter(str(exc)) from exc
 
     if json_output:
-        console.print(json.dumps(result, indent=2))
+        typer.echo(json.dumps(result, indent=2))
     else:
         console.print(f"Prepared session {result['agent_session_id']}")
 
@@ -62,7 +62,7 @@ def submit_turn(
     root = request.resolve().parent
     result = submit_turn_request(turn_request, root)
     if json_output:
-        console.print(json.dumps(result.to_dict(), indent=2))
+        typer.echo(json.dumps(result.to_dict(), indent=2))
     else:
         console.print(result.message)
 
