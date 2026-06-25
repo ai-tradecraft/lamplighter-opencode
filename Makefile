@@ -40,7 +40,7 @@ PRECOMMIT_PATH = $(if $(HOOK_PYTHON_BIN),$(HOOK_PYTHON_BIN):$(PATH),$(PATH))
 PRECOMMIT := uvx pre-commit
 JUST := uvx --from rust-just just
 
-.PHONY: help doctor install-deps setup ci lint qa test-real-backend check-uv
+.PHONY: help doctor install-deps setup ci lint qa test-real-backend print-real-backend-fingerprint check-uv
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
@@ -132,6 +132,10 @@ qa: check-uv ## Run the Python checks (ruff format check, ruff lint, ty, pytest)
 test-real-backend: check-uv ## Run the opt-in real OpenCode backend integration test
 	@if [ -f .env ]; then set -a; . ./.env; set +a; fi; \
 	LAMPLIGHTER_OPENCODE_USE_REAL_BACKEND=1 uv run pytest -m integration tests/test_real_backend_e2e.py
+
+print-real-backend-fingerprint: check-uv ## Print non-secret fingerprints of real backend env values
+	@if [ -f .env ]; then set -a; . ./.env; set +a; fi; \
+	python3 -c 'import hashlib, os; [print("%s: len=%s sha256[:12]=%s" % (name, len(value), hashlib.sha256(value.encode()).hexdigest()[:12] if value else "missing")) for name in ("AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_DEPLOYMENT", "AZURE_OPENAI_API_KEY") for value in [os.environ.get(name, "")]]'
 
 check-uv: ## Verify uv is installed (the only machine-level prerequisite)
 	@command -v uv > /dev/null || { \

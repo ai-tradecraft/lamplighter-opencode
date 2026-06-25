@@ -11,6 +11,7 @@ from lamplighter_opencode.contracts.models import AgentSessionSpec, AgentTurnReq
 from lamplighter_opencode.runtime.workspace import (
     azure_openai_base_url,
     azure_openai_resource_name,
+    azure_openai_responses_url,
     isolated_opencode_environment,
     materialize_opencode_config,
     submit_turn,
@@ -131,6 +132,7 @@ def test_azure_openai_endpoint_is_normalized(monkeypatch) -> None:
     monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://example-resource.openai.azure.com/")
 
     assert azure_openai_base_url() == "https://example-resource.openai.azure.com/openai"
+    assert azure_openai_responses_url() == "https://example-resource.openai.azure.com/openai/v1/responses"
     assert azure_openai_resource_name() == "example-resource"
 
 

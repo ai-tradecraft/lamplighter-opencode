@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
+import urllib.error
+import urllib.request
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -123,6 +126,11 @@ def deterministic_date_prompt(expected_date: str | None = None) -> str:
     )
 
 
+def deterministic_math_prompt() -> tuple[str, str]:
+    """Return a deterministic prompt whose answer is not included in the prompt."""
+    return "Compute 137 * 241. Return only the integer result, with no commas and no other text.", "33017"
+
+
 def opencode_model() -> str:
     """Return the explicit model id the harness will allow OpenCode to use."""
     deployment = os.environ.get("AZURE_OPENAI_DEPLOYMENT")
@@ -140,6 +148,39 @@ def validate_real_backend_environment() -> None:
     ]
     if missing:
         raise ValueError(f"Missing required real backend environment variables: {', '.join(missing)}")
+
+
+def verify_azure_openai_api_key() -> str:
+    """Make one direct Azure OpenAI Responses API call using the injected API key."""
+    validate_real_backend_environment()
+    url = azure_openai_responses_url()
+    body = json.dumps(
+        {
+            "model": os.environ["AZURE_OPENAI_DEPLOYMENT"],
+            "input": "Return exactly OK and no other text.",
+        }
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "api-key": os.environ["AZURE_OPENAI_API_KEY"],
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[-1000:]
+        raise ValueError(f"Azure OpenAI API key verification failed with HTTP {exc.code}: {detail}") from exc
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Azure OpenAI API key verification failed: {exc}") from exc
+
+    if payload.get("status") != "completed":
+        raise ValueError(f"Azure OpenAI API key verification did not complete: {payload.get('status')}")
+    return str(payload.get("id", ""))
 
 
 def materialize_opencode_config(root: Path) -> Path:
@@ -236,6 +277,19 @@ def azure_openai_base_url() -> str:
         path = f"{path}/openai" if path else "/openai"
 
     return urlunparse((parsed.scheme, parsed.netloc, path, "", "", ""))
+
+
+def azure_openai_responses_url() -> str:
+    """Return the Azure OpenAI v1 Responses endpoint for API-key verification."""
+    endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT")
+    if not endpoint:
+        raise ValueError("AZURE_OPENAI_ENDPOINT is required for the real OpenCode backend.")
+
+    parsed = urlparse(endpoint)
+    path = parsed.path.rstrip("/")
+    if not path.endswith("/openai/v1"):
+        path = f"{path}/openai/v1" if path else "/openai/v1"
+    return urlunparse((parsed.scheme, parsed.netloc, f"{path}/responses", "", "", ""))
 
 
 def azure_openai_resource_name() -> str:

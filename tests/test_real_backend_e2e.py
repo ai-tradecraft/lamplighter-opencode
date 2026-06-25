@@ -5,13 +5,12 @@ from __future__ import annotations
 import json
 import os
 import shutil
-from datetime import UTC, datetime
 
 import pytest
 from typer.testing import CliRunner
 
 from lamplighter_opencode.cli import app
-from lamplighter_opencode.runtime.workspace import deterministic_date_prompt
+from lamplighter_opencode.runtime.workspace import deterministic_math_prompt, verify_azure_openai_api_key
 
 runner = CliRunner()
 
@@ -19,14 +18,17 @@ runner = CliRunner()
 pytestmark = pytest.mark.integration
 
 
-def test_real_backend_returns_deterministic_date(tmp_path) -> None:
+def test_real_backend_returns_deterministic_math_result(tmp_path) -> None:
     """Prepare a session and submit one real backend prompt through the CLI."""
     if os.environ.get("LAMPLIGHTER_OPENCODE_USE_REAL_BACKEND") != "1":
         pytest.skip("Set LAMPLIGHTER_OPENCODE_USE_REAL_BACKEND=1 to run the real backend test.")
     if shutil.which("opencode") is None:
         pytest.skip("The `opencode` executable is required for the real backend test.")
 
-    expected_date = datetime.now(UTC).date().isoformat()
+    response_id = verify_azure_openai_api_key()
+    assert response_id.startswith("resp_")
+
+    prompt, expected_answer = deterministic_math_prompt()
     session_id = "session_real_backend_e2e"
     spec_path = tmp_path / "spec.json"
     workspace = tmp_path / session_id / "workspace"
@@ -54,7 +56,7 @@ def test_real_backend_returns_deterministic_date(tmp_path) -> None:
                 "id": "turn_real_backend_e2e",
                 "agent_session_id": session_id,
                 "type": "prompt_response",
-                "instruction": deterministic_date_prompt(expected_date),
+                "instruction": prompt,
             }
         ),
         encoding="utf-8",
@@ -65,4 +67,4 @@ def test_real_backend_returns_deterministic_date(tmp_path) -> None:
 
     result = json.loads(submit.stdout)
     assert result["status"] == "completed", result
-    assert result["message"].strip() == expected_date
+    assert result["message"].strip() == expected_answer
