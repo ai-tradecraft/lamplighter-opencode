@@ -93,6 +93,7 @@ app.MapPost("/api/runner/events", async (
     CancellationToken cancellationToken) =>
 {
     await runnerStore.AddEventAsync(runnerEvent, cancellationToken);
+    await ApplyRunnerEventAsync(runnerEvent, runnerStore, sessionStore, cancellationToken);
     await PublishAsync(
         sessionStore,
         hub,
@@ -264,6 +265,145 @@ static TimeSpan ParseLongPollWait(string? wait)
     return int.TryParse(wait, out seconds)
         ? TimeSpan.FromSeconds(Math.Clamp(seconds, 0, 120))
         : TimeSpan.FromSeconds(30);
+}
+
+static async Task ApplyRunnerEventAsync(
+    RunnerEventEnvelope runnerEvent,
+    RunnerControlStore runnerStore,
+    AgentSessionStore sessionStore,
+    CancellationToken cancellationToken)
+{
+    switch (runnerEvent.Type)
+    {
+        case RunnerEventTypes.AgentSessionReady:
+        {
+            var session = await sessionStore.GetSessionAsync(runnerEvent.AgentSessionId, cancellationToken);
+            if (session is not null)
+            {
+                await sessionStore.UpsertSessionAsync(
+                    session with
+                    {
+                        Status = "ready",
+                        ReadyAt = runnerEvent.CreatedAt,
+                        FailedAt = null,
+                        FailureSummary = null
+                    },
+                    cancellationToken);
+            }
+            break;
+        }
+
+        case RunnerEventTypes.AgentSessionFailed:
+        {
+            var session = await sessionStore.GetSessionAsync(runnerEvent.AgentSessionId, cancellationToken);
+            if (session is not null)
+            {
+                await sessionStore.UpsertSessionAsync(
+                    session with
+                    {
+                        Status = "failed",
+                        FailedAt = runnerEvent.CreatedAt,
+                        FailureSummary = await PayloadSummaryAsync(runnerStore, runnerEvent.PayloadRef, "Agent session failed.", cancellationToken)
+                    },
+                    cancellationToken);
+            }
+            break;
+        }
+
+        case "agent_session.cancelled":
+        {
+            var session = await sessionStore.GetSessionAsync(runnerEvent.AgentSessionId, cancellationToken);
+            if (session is not null)
+            {
+                await sessionStore.UpsertSessionAsync(
+                    session with { Status = "cancelled", EndedAt = runnerEvent.CreatedAt },
+                    cancellationToken);
+            }
+            break;
+        }
+
+        case RunnerEventTypes.AgentTurnCompleted:
+        {
+            var turn = await sessionStore.GetTurnAsync(runnerEvent.AgentSessionId, runnerEvent.CorrelationId, cancellationToken);
+            if (turn is null)
+            {
+                break;
+            }
+
+            var result = await PayloadJsonAsync<AgentTurnResult>(runnerStore, runnerEvent.PayloadRef, cancellationToken);
+            await sessionStore.UpsertTurnAsync(
+                turn with
+                {
+                    Status = result?.Status ?? "completed",
+                    CompletedAt = runnerEvent.CreatedAt,
+                    Response = result?.Message,
+                    FailureSummary = result?.FailureReport?.Summary
+                },
+                cancellationToken);
+            break;
+        }
+
+        case RunnerEventTypes.AgentTurnFailed:
+        {
+            var turn = await sessionStore.GetTurnAsync(runnerEvent.AgentSessionId, runnerEvent.CorrelationId, cancellationToken);
+            if (turn is not null)
+            {
+                await sessionStore.UpsertTurnAsync(
+                    turn with
+                    {
+                        Status = "failed",
+                        CompletedAt = runnerEvent.CreatedAt,
+                        FailureSummary = await PayloadSummaryAsync(runnerStore, runnerEvent.PayloadRef, "Agent turn failed.", cancellationToken)
+                    },
+                    cancellationToken);
+            }
+            break;
+        }
+    }
+}
+
+static async Task<T?> PayloadJsonAsync<T>(
+    RunnerControlStore runnerStore,
+    ClaimCheckContentRef? payloadRef,
+    CancellationToken cancellationToken)
+{
+    if (payloadRef is null)
+    {
+        return default;
+    }
+
+    var content = await runnerStore.GetContentAsync(ContentId(payloadRef), cancellationToken);
+    return content is null
+        ? default
+        : JsonSerializer.Deserialize<T>(content.Value.Bytes, JsonDefaults.Options);
+}
+
+static async Task<string> PayloadSummaryAsync(
+    RunnerControlStore runnerStore,
+    ClaimCheckContentRef? payloadRef,
+    string fallback,
+    CancellationToken cancellationToken)
+{
+    if (payloadRef is null)
+    {
+        return fallback;
+    }
+
+    var content = await runnerStore.GetContentAsync(ContentId(payloadRef), cancellationToken);
+    if (content is null)
+    {
+        return fallback;
+    }
+
+    var text = System.Text.Encoding.UTF8.GetString(content.Value.Bytes).Trim();
+    return string.IsNullOrWhiteSpace(text)
+        ? fallback
+        : text.Length <= 500 ? text : text[..500];
+}
+
+static string ContentId(ClaimCheckContentRef contentRef)
+{
+    return contentRef.Uri.Split('/', StringSplitOptions.RemoveEmptyEntries).Last();
 }
 
 static async Task PublishAsync(
