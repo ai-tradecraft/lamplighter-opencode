@@ -151,6 +151,13 @@ public sealed class RunnerCommandEndpointTests : IClassFixture<WebApplicationFac
         Assert.NotNull(refreshed);
         Assert.Equal("completed", refreshed.Status);
         Assert.Equal("hello from runner", refreshed.Response);
+
+        var events = await client.GetFromJsonAsync<IReadOnlyCollection<RuntimeEventRecord>>(
+            $"/api/agent-sessions/{session.Id}/events",
+            JsonDefaults.Options);
+        Assert.NotNull(events);
+        var completedEvent = Assert.Single(events, item => item.Type == RunnerEventTypes.AgentTurnCompleted);
+        Assert.Equal(turn.Id, completedEvent.TurnId);
     }
 
     private static async Task<IReadOnlyCollection<RunnerCommandEnvelope>> PollCommandsAsync(HttpClient client)

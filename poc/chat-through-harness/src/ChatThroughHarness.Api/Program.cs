@@ -98,7 +98,7 @@ app.MapPost("/api/runner/events", async (
         sessionStore,
         hub,
         runnerEvent.AgentSessionId,
-        null,
+        RunnerEventTurnId(runnerEvent),
         runnerEvent.Type,
         runnerEvent,
         cancellationToken);
@@ -404,6 +404,13 @@ static async Task<string> PayloadSummaryAsync(
 static string ContentId(ClaimCheckContentRef contentRef)
 {
     return contentRef.Uri.Split('/', StringSplitOptions.RemoveEmptyEntries).Last();
+}
+
+static string? RunnerEventTurnId(RunnerEventEnvelope runnerEvent)
+{
+    return runnerEvent.Type.StartsWith("agent_turn.", StringComparison.Ordinal)
+        ? runnerEvent.CorrelationId
+        : null;
 }
 
 static async Task PublishAsync(
