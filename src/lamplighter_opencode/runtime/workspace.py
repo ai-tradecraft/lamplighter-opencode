@@ -12,6 +12,7 @@ import urllib.error
 import urllib.request
 import uuid
 from base64 import b64encode
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -193,6 +194,112 @@ def submit_turn_to_opencode_server(
         message=message,
         commands_observed=observed,
     )
+
+
+def stream_opencode_events(
+    root: Path,
+    *,
+    limit: int | None = None,
+    timeout: float = 60,
+) -> list[RuntimeEvent]:
+    """Subscribe to OpenCode SSE events and persist normalized runtime events."""
+    root = root.resolve()
+    metadata = _read_json(root / "opencode-server.json")
+    workspace = _metadata_string(metadata, "workspace")
+    status = _metadata_string(metadata, "status")
+    if status != "ready":
+        raise OpenCodeServerError(f"OpenCode server is not ready for event streaming: {status}")
+
+    request = urllib.request.Request(
+        _opencode_url(metadata, "/event", query={"directory": workspace}),
+        headers={
+            "Accept": "text/event-stream",
+            "Authorization": _opencode_auth_header(metadata),
+        },
+        method="GET",
+    )
+
+    collected: list[RuntimeEvent] = []
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            for raw_event in _iter_sse_json(response):
+                for event in normalize_opencode_event(raw_event, _metadata_agent_session_id(root)):
+                    append_runtime_event(root / "events.jsonl", event)
+                    collected.append(event)
+                    if limit is not None and len(collected) >= limit:
+                        return collected
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[-2000:]
+        raise OpenCodeServerError(f"GET /event failed with HTTP {exc.code}: {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise OpenCodeServerError(f"GET /event failed: {exc}") from exc
+
+    return collected
+
+
+def normalize_opencode_event(raw_event: dict[str, Any], agent_session_id: str) -> list[RuntimeEvent]:
+    """Map one OpenCode event into one or more Tradecraft runtime events."""
+    event_type = _optional_metadata_string(raw_event, "type") or "unknown"
+    properties = raw_event.get("properties")
+    if not isinstance(properties, dict):
+        properties = {}
+
+    if event_type == "message.part.updated":
+        part = properties.get("part")
+        if not isinstance(part, dict):
+            return [_runtime_event(agent_session_id, "opencode.event", event_type, {"raw_event": raw_event})]
+        return [_normalize_part_updated(agent_session_id, event_type, part, properties.get("delta"))]
+
+    if event_type == "message.updated":
+        info = properties.get("info")
+        if isinstance(info, dict) and info.get("error"):
+            return [_runtime_event(agent_session_id, "agent_turn.failed", event_type, {"message": info})]
+        if isinstance(info, dict):
+            return [
+                _runtime_event(
+                    agent_session_id,
+                    "agent_message.updated",
+                    event_type,
+                    {
+                        "message_id": info.get("id"),
+                        "opencode_session_id": info.get("sessionID"),
+                        "role": info.get("role"),
+                        "finish": info.get("finish"),
+                        "cost": info.get("cost"),
+                        "tokens": info.get("tokens"),
+                    },
+                )
+            ]
+
+    if event_type == "permission.updated":
+        return [_runtime_event(agent_session_id, "agent_permission.requested", event_type, {"permission": properties})]
+
+    if event_type == "permission.replied":
+        return [_runtime_event(agent_session_id, "agent_permission.replied", event_type, properties)]
+
+    if event_type == "session.status":
+        status = properties.get("status")
+        status_type = status.get("type") if isinstance(status, dict) else None
+        normalized = {
+            "idle": "agent_session.idle",
+            "busy": "agent_session.busy",
+            "retry": "agent_session.retry",
+        }.get(str(status_type), "agent_session.status")
+        return [_runtime_event(agent_session_id, normalized, event_type, properties)]
+
+    if event_type == "session.idle":
+        return [_runtime_event(agent_session_id, "agent_session.idle", event_type, properties)]
+
+    if event_type == "session.error":
+        return [_runtime_event(agent_session_id, "agent_turn.failed", event_type, properties)]
+
+    if event_type == "command.executed":
+        return [_runtime_event(agent_session_id, "agent_command.executed", event_type, properties)]
+
+    if event_type == "todo.updated":
+        return [_runtime_event(agent_session_id, "agent_todo.updated", event_type, properties)]
+
+    return [_runtime_event(agent_session_id, "opencode.event", event_type, {"raw_event": raw_event})]
 
 
 def start_opencode_server(
@@ -601,6 +708,125 @@ def _request_json(
     if not isinstance(value, dict):
         raise OpenCodeServerError(f"{method} {path} returned a non-object JSON response.")
     return value
+
+
+def _opencode_url(metadata: dict[str, Any], path: str, *, query: dict[str, str] | None = None) -> str:
+    url = f"{_metadata_string(metadata, 'endpoint').rstrip('/')}{path}"
+    if query:
+        url = f"{url}?{urlencode(query)}"
+    return url
+
+
+def _iter_sse_json(response: Any) -> Iterable[dict[str, Any]]:
+    data_lines: list[str] = []
+    for raw_line in response:
+        line = raw_line.decode("utf-8").rstrip("\r\n")
+        if not line:
+            if data_lines:
+                value = json.loads("\n".join(data_lines))
+                if isinstance(value, dict):
+                    yield value
+                data_lines = []
+            continue
+        if line.startswith(":"):
+            continue
+        if line.startswith("data:"):
+            data_lines.append(line.removeprefix("data:").lstrip())
+
+    if data_lines:
+        value = json.loads("\n".join(data_lines))
+        if isinstance(value, dict):
+            yield value
+
+
+def _normalize_part_updated(
+    agent_session_id: str,
+    opencode_event_type: str,
+    part: dict[str, Any],
+    delta: object,
+) -> RuntimeEvent:
+    part_type = str(part.get("type") or "unknown")
+    base_payload = {
+        "opencode_session_id": part.get("sessionID"),
+        "message_id": part.get("messageID"),
+        "part_id": part.get("id"),
+        "part_type": part_type,
+    }
+
+    if part_type == "text":
+        return _runtime_event(
+            agent_session_id,
+            "agent_turn.output_delta",
+            opencode_event_type,
+            {**base_payload, "delta": delta if isinstance(delta, str) else part.get("text", "")},
+        )
+
+    if part_type == "reasoning":
+        return _runtime_event(
+            agent_session_id,
+            "agent_reasoning.delta",
+            opencode_event_type,
+            {**base_payload, "delta": delta if isinstance(delta, str) else part.get("text", "")},
+        )
+
+    if part_type == "tool":
+        state = part.get("state")
+        status = state.get("status") if isinstance(state, dict) else "unknown"
+        return _runtime_event(
+            agent_session_id,
+            f"agent_tool.{status}",
+            opencode_event_type,
+            {
+                **base_payload,
+                "call_id": part.get("callID"),
+                "tool": part.get("tool"),
+                "state": state,
+            },
+        )
+
+    if part_type == "step-start":
+        return _runtime_event(agent_session_id, "agent_step.started", opencode_event_type, base_payload)
+
+    if part_type == "step-finish":
+        return _runtime_event(
+            agent_session_id,
+            "agent_step.finished",
+            opencode_event_type,
+            {
+                **base_payload,
+                "reason": part.get("reason"),
+                "cost": part.get("cost"),
+                "tokens": part.get("tokens"),
+            },
+        )
+
+    if part_type == "retry":
+        return _runtime_event(agent_session_id, "agent_turn.retry", opencode_event_type, {**base_payload, "part": part})
+
+    return _runtime_event(agent_session_id, "opencode.event", opencode_event_type, {**base_payload, "part": part})
+
+
+def _runtime_event(
+    agent_session_id: str,
+    event_type: str,
+    opencode_event_type: str,
+    payload: dict[str, Any],
+) -> RuntimeEvent:
+    return RuntimeEvent(
+        event_type=event_type,
+        agent_session_id=agent_session_id,
+        payload={
+            "source": "opencode",
+            "opencode_event_type": opencode_event_type,
+            **payload,
+        },
+    )
+
+
+def _metadata_agent_session_id(root: Path) -> str:
+    session = _read_json(root / "session.json") if (root / "session.json").exists() else {}
+    value = session.get("agent_session_id") or root.name
+    return str(value)
 
 
 def _read_json(path: Path) -> dict[str, Any]:

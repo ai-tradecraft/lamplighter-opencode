@@ -11,7 +11,11 @@ from rich.console import Console
 
 from lamplighter_opencode.contracts.models import AgentSessionSpec, AgentTurnRequest
 from lamplighter_opencode.contracts.validation import ContractValidationError, validate_contract
-from lamplighter_opencode.runtime.workspace import materialize_session_workspace, start_opencode_server
+from lamplighter_opencode.runtime.workspace import (
+    materialize_session_workspace,
+    start_opencode_server,
+    stream_opencode_events,
+)
 from lamplighter_opencode.runtime.workspace import submit_turn as submit_turn_request
 
 app = typer.Typer()
@@ -151,6 +155,43 @@ def start_session(
         return
 
     console.print(f"OpenCode server {metadata['status']} at {metadata['endpoint']}")
+
+
+@app.command("stream-events")
+def stream_events(
+    session: Annotated[str, typer.Option()],
+    runtime_root: RuntimeRootOption = Path(".agent-runtime"),
+    limit: Annotated[
+        int, typer.Option(help="Stop after this many normalized events. Use 0 to stream until closed.")
+    ] = 0,
+    json_output: JsonOutputOption = False,
+) -> None:
+    """Subscribe to OpenCode SSE events and append normalized runtime events."""
+    session_root = runtime_root / "sessions" / session
+    if not session_root.exists():
+        console.print(f"[red]Failed to stream events:[/red] {session_root} does not exist.")
+        raise typer.Exit(code=1)
+
+    try:
+        events = stream_opencode_events(session_root, limit=limit or None)
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        console.print(f"[red]Failed to stream events:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    if json_output:
+        typer.echo(
+            json.dumps(
+                {
+                    "agent_session_id": session,
+                    "events_written": len(events),
+                    "events": [event.to_dict() for event in events],
+                },
+                indent=2,
+            )
+        )
+        return
+
+    console.print(f"Wrote {len(events)} normalized OpenCode events")
 
 
 def _read_json_object(path: Path) -> dict[str, object]:

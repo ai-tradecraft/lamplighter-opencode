@@ -18,10 +18,12 @@ from lamplighter_opencode.runtime.workspace import (
     azure_openai_responses_url,
     isolated_opencode_environment,
     materialize_opencode_config,
+    normalize_opencode_event,
     opencode_config_mode,
     opencode_environment,
     opencode_run_command,
     opencode_serve_command,
+    stream_opencode_events,
     submit_turn,
 )
 
@@ -284,6 +286,167 @@ def test_submit_turn_uses_ready_opencode_server_metadata(tmp_path, monkeypatch) 
     assert metadata["opencode_session_id"] == "oc_session_1"
 
 
+def test_normalize_opencode_events_cover_core_runtime_event_types() -> None:
+    """OpenCode events map to Tradecraft runtime event names and compact payloads."""
+    samples = [
+        (
+            {
+                "type": "message.part.updated",
+                "properties": {
+                    "delta": "hello",
+                    "part": {
+                        "id": "part_1",
+                        "sessionID": "oc_session_1",
+                        "messageID": "message_1",
+                        "type": "text",
+                        "text": "hello",
+                    },
+                },
+            },
+            "agent_turn.output_delta",
+        ),
+        (
+            {
+                "type": "message.part.updated",
+                "properties": {
+                    "part": {
+                        "id": "part_2",
+                        "sessionID": "oc_session_1",
+                        "messageID": "message_1",
+                        "type": "tool",
+                        "tool": "bash",
+                        "callID": "call_1",
+                        "state": {"status": "running", "input": {}, "time": {"start": 1}},
+                    },
+                },
+            },
+            "agent_tool.running",
+        ),
+        (
+            {
+                "type": "message.part.updated",
+                "properties": {
+                    "part": {
+                        "id": "part_3",
+                        "sessionID": "oc_session_1",
+                        "messageID": "message_1",
+                        "type": "step-finish",
+                        "reason": "stop",
+                        "cost": 0.01,
+                        "tokens": {"input": 1, "output": 2, "reasoning": 0, "cache": {"read": 0, "write": 0}},
+                    },
+                },
+            },
+            "agent_step.finished",
+        ),
+        (
+            {"type": "permission.updated", "properties": {"id": "permission_1", "title": "Allow bash?"}},
+            "agent_permission.requested",
+        ),
+        (
+            {"type": "session.status", "properties": {"sessionID": "oc_session_1", "status": {"type": "idle"}}},
+            "agent_session.idle",
+        ),
+        (
+            {
+                "type": "session.error",
+                "properties": {"sessionID": "oc_session_1", "error": {"name": "ProviderAuthError"}},
+            },
+            "agent_turn.failed",
+        ),
+    ]
+
+    event_types = [normalize_opencode_event(raw, "session_1")[0].event_type for raw, _ in samples]
+
+    assert event_types == [expected for _, expected in samples]
+
+
+def test_stream_opencode_events_appends_runtime_events(tmp_path, monkeypatch) -> None:
+    """stream_opencode_events reads SSE data and appends normalized runtime events."""
+    root = tmp_path / ".agent-runtime" / "sessions" / "session_1"
+    workspace = root / "workspace"
+    workspace.mkdir(parents=True)
+    (root / "session.json").write_text(json.dumps({"agent_session_id": "session_1"}), encoding="utf-8")
+    (root / "opencode-server.json").write_text(
+        json.dumps(
+            {
+                "status": "ready",
+                "endpoint": "http://127.0.0.1:4097",
+                "workspace": str(workspace),
+                "auth": {"username": "opencode", "password": "test-password"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_urlopen(http_request, timeout=60):  # noqa: ANN001, ANN202, ARG001
+        assert http_request.full_url.startswith("http://127.0.0.1:4097/event?")
+        assert http_request.headers["Accept"] == "text/event-stream"
+        return _SseResponse(
+            [
+                {
+                    "type": "message.part.updated",
+                    "properties": {
+                        "delta": "hello",
+                        "part": {
+                            "id": "part_1",
+                            "sessionID": "oc_session_1",
+                            "messageID": "message_1",
+                            "type": "text",
+                            "text": "hello",
+                        },
+                    },
+                },
+                {"type": "session.status", "properties": {"sessionID": "oc_session_1", "status": {"type": "idle"}}},
+            ]
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    events = stream_opencode_events(root, limit=2)
+
+    assert [event.event_type for event in events] == ["agent_turn.output_delta", "agent_session.idle"]
+    written = [
+        json.loads(line) for line in (root / "events.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()
+    ]
+    assert [event["event_type"] for event in written] == ["agent_turn.output_delta", "agent_session.idle"]
+
+
+def test_stream_events_command_emits_json_summary(tmp_path, monkeypatch) -> None:
+    """stream-events CLI command reports appended normalized event count."""
+    runtime_root = tmp_path / ".agent-runtime"
+    root = runtime_root / "sessions" / "session_1"
+    workspace = root / "workspace"
+    workspace.mkdir(parents=True)
+    (root / "session.json").write_text(json.dumps({"agent_session_id": "session_1"}), encoding="utf-8")
+    (root / "opencode-server.json").write_text(
+        json.dumps(
+            {
+                "status": "ready",
+                "endpoint": "http://127.0.0.1:4097",
+                "workspace": str(workspace),
+                "auth": {"username": "opencode", "password": "test-password"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_urlopen(http_request, timeout=60):  # noqa: ANN001, ANN202, ARG001
+        return _SseResponse([{"type": "session.status", "properties": {"status": {"type": "idle"}}}])
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    result = runner.invoke(
+        app,
+        ["stream-events", "--session", "session_1", "--runtime-root", str(runtime_root), "--limit", "1", "--json"],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["events_written"] == 1
+    assert payload["events"][0]["event_type"] == "agent_session.idle"
+
+
 def test_azure_openai_endpoint_is_normalized(monkeypatch) -> None:
     """Azure resource root endpoints are normalized to the OpenCode base path."""
     monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://example-resource.openai.azure.com/")
@@ -350,3 +513,20 @@ class _JsonResponse:
 
     def read(self) -> bytes:
         return self._payload
+
+
+class _SseResponse:
+    def __init__(self, values: list[object]) -> None:
+        self._lines = []
+        for value in values:
+            self._lines.append(f"data: {json.dumps(value)}\n".encode())
+            self._lines.append(b"\n")
+
+    def __enter__(self) -> "_SseResponse":
+        return self
+
+    def __exit__(self, *args) -> None:  # noqa: ANN002
+        return None
+
+    def __iter__(self):
+        return iter(self._lines)
