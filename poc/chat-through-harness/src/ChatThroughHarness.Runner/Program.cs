@@ -11,7 +11,9 @@ builder.Services.AddHttpClient<RunnerApiClient>((sp, client) =>
     var options = sp.GetRequiredService<IOptions<RunnerOptions>>().Value;
     client.BaseAddress = options.OrchestratorBaseUri;
 });
-builder.Services.AddSingleton<IRunnerCommandHandler, DeferredRunnerCommandHandler>();
+builder.Services.AddTransient<IRunnerApiClient>(sp => sp.GetRequiredService<RunnerApiClient>());
+builder.Services.AddSingleton<IHarnessProcessRunner, HarnessProcessRunner>();
+builder.Services.AddSingleton<IRunnerCommandHandler, CliRunnerCommandHandler>();
 builder.Services.AddSingleton<RunnerCommandLoop>();
 builder.Services.AddHostedService<RunnerWorker>();
 

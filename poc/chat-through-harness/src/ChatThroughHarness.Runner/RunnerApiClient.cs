@@ -1,10 +1,24 @@
 using System.Net.Http.Json;
+using System.Security.Cryptography;
+using System.Text;
 using ChatThroughHarness.Protocol;
 using Microsoft.Extensions.Options;
 
 namespace ChatThroughHarness.Runner;
 
-public sealed class RunnerApiClient(HttpClient httpClient, IOptions<RunnerOptions> options)
+public interface IRunnerApiClient
+{
+    Task<IReadOnlyCollection<RunnerCommandEnvelope>> PollCommandsAsync(CancellationToken cancellationToken);
+    Task<RunnerCommandEnvelope> ClaimCommandAsync(RunnerCommandEnvelope command, CancellationToken cancellationToken);
+    Task CompleteCommandAsync(RunnerCommandEnvelope command, RunnerCommandResult result, CancellationToken cancellationToken);
+    Task<string> DownloadContentStringAsync(ClaimCheckContentRef contentRef, CancellationToken cancellationToken);
+    Task<byte[]> DownloadContentBytesAsync(ClaimCheckContentRef contentRef, CancellationToken cancellationToken);
+    Task<ClaimCheckContentRef> UploadContentAsync(string content, string contentType, CancellationToken cancellationToken);
+    Task<ClaimCheckContentRef> UploadContentAsync(byte[] bytes, string contentType, CancellationToken cancellationToken);
+    Task PublishEventAsync(RunnerEventEnvelope runnerEvent, CancellationToken cancellationToken);
+}
+
+public sealed class RunnerApiClient(HttpClient httpClient, IOptions<RunnerOptions> options) : IRunnerApiClient
 {
     private readonly RunnerOptions _options = options.Value;
 
@@ -54,5 +68,81 @@ public sealed class RunnerApiClient(HttpClient httpClient, IOptions<RunnerOption
             RunnerProtocolJson.Options,
             cancellationToken);
         response.EnsureSuccessStatusCode();
+    }
+
+    public async Task<string> DownloadContentStringAsync(
+        ClaimCheckContentRef contentRef,
+        CancellationToken cancellationToken)
+    {
+        var bytes = await DownloadContentBytesAsync(contentRef, cancellationToken);
+        return Encoding.UTF8.GetString(bytes);
+    }
+
+    public async Task<byte[]> DownloadContentBytesAsync(
+        ClaimCheckContentRef contentRef,
+        CancellationToken cancellationToken)
+    {
+        var contentId = ContentId(contentRef);
+        var bytes = await httpClient.GetByteArrayAsync($"/api/runner/content/{contentId}", cancellationToken);
+        var actualSha = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+        if (!string.Equals(actualSha, contentRef.Sha256, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException($"Downloaded content {contentRef.Uri} failed sha256 validation.");
+        }
+
+        if (bytes.LongLength != contentRef.Length)
+        {
+            throw new InvalidDataException($"Downloaded content {contentRef.Uri} failed length validation.");
+        }
+
+        return bytes;
+    }
+
+    public async Task<ClaimCheckContentRef> UploadContentAsync(
+        string content,
+        string contentType,
+        CancellationToken cancellationToken)
+    {
+        return await UploadContentAsync(Encoding.UTF8.GetBytes(content), contentType, cancellationToken);
+    }
+
+    public async Task<ClaimCheckContentRef> UploadContentAsync(
+        byte[] bytes,
+        string contentType,
+        CancellationToken cancellationToken)
+    {
+        var sha = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+        var response = await httpClient.PostAsJsonAsync(
+            "/api/runner/content",
+            new ClaimCheckContentUploadRequest(
+                ContentType: contentType,
+                Sha256: sha,
+                Length: bytes.LongLength,
+                ContentBase64: Convert.ToBase64String(bytes)),
+            RunnerProtocolJson.Options,
+            cancellationToken);
+        response.EnsureSuccessStatusCode();
+
+        var upload = await response.Content.ReadFromJsonAsync<ClaimCheckContentUploadResponse>(
+            RunnerProtocolJson.Options,
+            cancellationToken);
+        return upload?.ContentRef ?? throw new InvalidOperationException("Content upload response was empty.");
+    }
+
+    public async Task PublishEventAsync(
+        RunnerEventEnvelope runnerEvent,
+        CancellationToken cancellationToken)
+    {
+        var response = await httpClient.PostAsJsonAsync(
+            "/api/runner/events",
+            runnerEvent,
+            RunnerProtocolJson.Options,
+            cancellationToken);
+        response.EnsureSuccessStatusCode();
+    }
+
+    private static string ContentId(ClaimCheckContentRef contentRef)
+    {
+        return contentRef.Uri.Split('/', StringSplitOptions.RemoveEmptyEntries).Last();
     }
 }

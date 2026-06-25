@@ -8,4 +8,6 @@ public sealed record RunnerOptions
     public TimeSpan LongPollWait { get; init; } = TimeSpan.FromSeconds(30);
     public int LeaseSeconds { get; init; } = 60;
     public TimeSpan RetryBackoff { get; init; } = TimeSpan.FromSeconds(5);
+    public string RuntimeRoot { get; init; } = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../.agent-runtime"));
+    public string? HarnessRepoRoot { get; init; }
 }

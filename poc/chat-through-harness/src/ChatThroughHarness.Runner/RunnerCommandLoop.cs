@@ -5,7 +5,7 @@ using Microsoft.Extensions.Options;
 namespace ChatThroughHarness.Runner;
 
 public sealed class RunnerCommandLoop(
-    RunnerApiClient apiClient,
+    IRunnerApiClient apiClient,
     IRunnerCommandHandler commandHandler,
     IOptions<RunnerOptions> options,
     ILogger<RunnerCommandLoop> logger)
