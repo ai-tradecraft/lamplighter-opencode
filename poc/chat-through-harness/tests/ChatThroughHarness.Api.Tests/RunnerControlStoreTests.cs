@@ -9,7 +9,7 @@ public sealed class RunnerControlStoreTests
     [Fact]
     public async Task CommandCanBePolledClaimedAndCompleted()
     {
-        var store = new RunnerControlStore();
+        var store = new RunnerControlStore(NewRuntimeRoot());
         var command = new RunnerCommandEnvelope(
             Id: "cmd_1",
             RunnerId: null,
@@ -55,7 +55,7 @@ public sealed class RunnerControlStoreTests
     [Fact]
     public async Task EventsAreStoredForDiagnostics()
     {
-        var store = new RunnerControlStore();
+        var store = new RunnerControlStore(NewRuntimeRoot());
         var runnerEvent = new RunnerEventEnvelope(
             Id: "event_1",
             RunnerId: "runner_1",
@@ -77,7 +77,7 @@ public sealed class RunnerControlStoreTests
     [Fact]
     public async Task ContentUploadValidatesHashAndLength()
     {
-        var store = new RunnerControlStore();
+        var store = new RunnerControlStore(NewRuntimeRoot());
         var bytes = "hello"u8.ToArray();
         var sha = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
 
@@ -104,5 +104,61 @@ public sealed class RunnerControlStoreTests
                 Length: bytes.Length,
                 ContentBase64: Convert.ToBase64String(bytes)),
             CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task StoreReloadsDurableRunnerState()
+    {
+        var root = NewRuntimeRoot();
+        var store = new RunnerControlStore(root);
+        var command = new RunnerCommandEnvelope(
+            Id: "cmd_1",
+            RunnerId: null,
+            AgentSessionId: "session_1",
+            Type: RunnerCommandTypes.PrepareAgentSession,
+            Status: RunnerCommandStatuses.Pending,
+            PayloadRef: null,
+            CorrelationId: "corr_1",
+            IdempotencyKey: "session_1",
+            CreatedAt: DateTimeOffset.UnixEpoch,
+            AvailableAt: DateTimeOffset.UnixEpoch,
+            Lease: null);
+        var runnerEvent = new RunnerEventEnvelope(
+            Id: "event_1",
+            RunnerId: "runner_1",
+            AgentSessionId: "session_1",
+            CommandId: "cmd_1",
+            Type: RunnerEventTypes.AgentSessionReady,
+            PayloadRef: null,
+            CausationId: "cmd_1",
+            CorrelationId: "corr_1",
+            CreatedAt: DateTimeOffset.UnixEpoch);
+        var heartbeat = new RunnerHeartbeat(
+            RunnerId: "runner_1",
+            Status: "online",
+            ActiveCommandIds: ["cmd_1"],
+            ObservedAt: DateTimeOffset.UnixEpoch);
+        var bytes = "persisted"u8.ToArray();
+        var sha = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+
+        await store.EnqueueCommandAsync(command, CancellationToken.None);
+        await store.AddEventAsync(runnerEvent, CancellationToken.None);
+        await store.UpsertRunnerHeartbeatAsync(heartbeat, CancellationToken.None);
+        var content = await store.SaveContentAsync(
+            new ClaimCheckContentUploadRequest("text/plain", sha, bytes.Length, Convert.ToBase64String(bytes)),
+            CancellationToken.None);
+
+        var reloaded = new RunnerControlStore(root);
+
+        Assert.Single(await reloaded.GetAvailableCommandsAsync("runner_1", CancellationToken.None));
+        Assert.Single(await reloaded.GetEventsAsync(CancellationToken.None));
+        Assert.Equal("online", (await reloaded.GetRunnerHeartbeatAsync("runner_1", CancellationToken.None))?.Status);
+        var contentId = content.ContentRef.Uri.Split('/').Last();
+        Assert.Equal(bytes, (await reloaded.GetContentAsync(contentId, CancellationToken.None))?.Bytes);
+    }
+
+    private static string NewRuntimeRoot()
+    {
+        return Path.Combine(Path.GetTempPath(), Ids.New("runner_runtime"));
     }
 }

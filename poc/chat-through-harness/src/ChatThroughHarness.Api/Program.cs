@@ -527,11 +527,26 @@ public sealed class RunnerControlStore
     private readonly ConcurrentDictionary<string, RunnerCommandEnvelope> _commands = new();
     private readonly ConcurrentBag<RunnerEventEnvelope> _events = [];
     private readonly ConcurrentDictionary<string, StoredClaimCheckContent> _content = new();
+    private readonly ConcurrentDictionary<string, RunnerHeartbeat> _runnerHeartbeats = new();
+    private readonly string _runtimeRoot;
+
+    public RunnerControlStore() : this(RuntimePaths.Root)
+    {
+    }
+
+    public RunnerControlStore(string runtimeRoot)
+    {
+        _runtimeRoot = runtimeRoot;
+        LoadCommands();
+        LoadEvents();
+        LoadContentMetadata();
+        LoadRunnerHeartbeats();
+    }
 
     public Task EnqueueCommandAsync(RunnerCommandEnvelope command, CancellationToken cancellationToken)
     {
         _commands[command.Id] = command;
-        return Task.CompletedTask;
+        return WriteJsonAsync(CommandPath(command.Id), command, cancellationToken);
     }
 
     public Task<IReadOnlyCollection<RunnerCommandEnvelope>> GetAvailableCommandsAsync(string runnerId, CancellationToken cancellationToken)
@@ -547,25 +562,25 @@ public sealed class RunnerControlStore
         return Task.FromResult<IReadOnlyCollection<RunnerCommandEnvelope>>(commands);
     }
 
-    public Task<RunnerCommandMutationResult> ClaimCommandAsync(
+    public async Task<RunnerCommandMutationResult> ClaimCommandAsync(
         string commandId,
         ClaimRunnerCommandRequest request,
         CancellationToken cancellationToken)
     {
         if (!_commands.TryGetValue(commandId, out var command))
         {
-            return Task.FromResult(RunnerCommandMutationResult.NotFound());
+            return RunnerCommandMutationResult.NotFound();
         }
 
         var now = DateTimeOffset.UtcNow;
         if (command.Lease is not null && command.Lease.ExpiresAt > now && command.Lease.RunnerId != request.RunnerId)
         {
-            return Task.FromResult(RunnerCommandMutationResult.Conflict("Command is leased by another runner."));
+            return RunnerCommandMutationResult.Conflict("Command is leased by another runner.");
         }
 
         if (command.Status is RunnerCommandStatuses.Completed or RunnerCommandStatuses.Cancelled)
         {
-            return Task.FromResult(RunnerCommandMutationResult.Conflict($"Command is already {command.Status}."));
+            return RunnerCommandMutationResult.Conflict($"Command is already {command.Status}.");
         }
 
         var lease = new RunnerCommandLease(
@@ -581,22 +596,23 @@ public sealed class RunnerControlStore
             Lease = lease
         };
         _commands[commandId] = claimed;
-        return Task.FromResult(RunnerCommandMutationResult.Ok(claimed));
+        await WriteJsonAsync(CommandPath(commandId), claimed, cancellationToken);
+        return RunnerCommandMutationResult.Ok(claimed);
     }
 
-    public Task<RunnerCommandMutationResult> CompleteCommandAsync(
+    public async Task<RunnerCommandMutationResult> CompleteCommandAsync(
         string commandId,
         CompleteRunnerCommandRequest request,
         CancellationToken cancellationToken)
     {
         if (!_commands.TryGetValue(commandId, out var command))
         {
-            return Task.FromResult(RunnerCommandMutationResult.NotFound());
+            return RunnerCommandMutationResult.NotFound();
         }
 
         if (command.Lease is null || command.Lease.LeaseId != request.LeaseId || command.Lease.RunnerId != request.RunnerId)
         {
-            return Task.FromResult(RunnerCommandMutationResult.Conflict("Command lease does not match completion request."));
+            return RunnerCommandMutationResult.Conflict("Command lease does not match completion request.");
         }
 
         var completed = command with
@@ -605,13 +621,19 @@ public sealed class RunnerControlStore
             Lease = null
         };
         _commands[commandId] = completed;
-        return Task.FromResult(RunnerCommandMutationResult.Ok(completed));
+        await WriteJsonAsync(CommandPath(commandId), completed, cancellationToken);
+        return RunnerCommandMutationResult.Ok(completed);
     }
 
-    public Task AddEventAsync(RunnerEventEnvelope runnerEvent, CancellationToken cancellationToken)
+    public async Task AddEventAsync(RunnerEventEnvelope runnerEvent, CancellationToken cancellationToken)
     {
         _events.Add(runnerEvent);
-        return Task.CompletedTask;
+        var path = RunnerEventsPath();
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        await File.AppendAllTextAsync(
+            path,
+            JsonSerializer.Serialize(runnerEvent, JsonLineOptions) + Environment.NewLine,
+            cancellationToken);
     }
 
     public Task<IReadOnlyCollection<RunnerEventEnvelope>> GetEventsAsync(CancellationToken cancellationToken)
@@ -619,7 +641,7 @@ public sealed class RunnerControlStore
         return Task.FromResult<IReadOnlyCollection<RunnerEventEnvelope>>(_events.OrderBy(e => e.CreatedAt).ToArray());
     }
 
-    public Task<ClaimCheckContentUploadResponse> SaveContentAsync(
+    public async Task<ClaimCheckContentUploadResponse> SaveContentAsync(
         ClaimCheckContentUploadRequest request,
         CancellationToken cancellationToken)
     {
@@ -642,14 +664,145 @@ public sealed class RunnerControlStore
             ContentType: request.ContentType,
             Length: bytes.LongLength);
         _content[contentId] = new StoredClaimCheckContent(contentRef, bytes);
-        return Task.FromResult(new ClaimCheckContentUploadResponse(contentRef));
+        Directory.CreateDirectory(ContentRoot());
+        await File.WriteAllBytesAsync(ContentBlobPath(contentId), bytes, cancellationToken);
+        await WriteJsonAsync(ContentMetadataPath(contentId), contentRef, cancellationToken);
+        return new ClaimCheckContentUploadResponse(contentRef);
     }
 
-    public Task<StoredClaimCheckContent?> GetContentAsync(string contentId, CancellationToken cancellationToken)
+    public async Task<StoredClaimCheckContent?> GetContentAsync(string contentId, CancellationToken cancellationToken)
     {
-        _content.TryGetValue(contentId, out var content);
-        return Task.FromResult<StoredClaimCheckContent?>(content);
+        if (_content.TryGetValue(contentId, out var content))
+        {
+            return content;
+        }
+
+        var metadataPath = ContentMetadataPath(contentId);
+        var blobPath = ContentBlobPath(contentId);
+        if (!File.Exists(metadataPath) || !File.Exists(blobPath))
+        {
+            return null;
+        }
+
+        var contentRef = await ReadJsonAsync<ClaimCheckContentRef>(metadataPath, cancellationToken);
+        var bytes = await File.ReadAllBytesAsync(blobPath, cancellationToken);
+        content = new StoredClaimCheckContent(contentRef, bytes);
+        _content[contentId] = content;
+        return content;
     }
+
+    public Task UpsertRunnerHeartbeatAsync(RunnerHeartbeat heartbeat, CancellationToken cancellationToken)
+    {
+        _runnerHeartbeats[heartbeat.RunnerId] = heartbeat;
+        return WriteJsonAsync(RunnerHeartbeatPath(heartbeat.RunnerId), heartbeat, cancellationToken);
+    }
+
+    public Task<RunnerHeartbeat?> GetRunnerHeartbeatAsync(string runnerId, CancellationToken cancellationToken)
+    {
+        _runnerHeartbeats.TryGetValue(runnerId, out var heartbeat);
+        return Task.FromResult(heartbeat);
+    }
+
+    private void LoadCommands()
+    {
+        var root = CommandRoot();
+        if (!Directory.Exists(root))
+        {
+            return;
+        }
+
+        foreach (var path in Directory.EnumerateFiles(root, "*.json"))
+        {
+            var command = JsonSerializer.Deserialize<RunnerCommandEnvelope>(File.ReadAllText(path), RunnerProtocolJson.Options);
+            if (command is not null)
+            {
+                _commands[command.Id] = command;
+            }
+        }
+    }
+
+    private void LoadEvents()
+    {
+        var path = RunnerEventsPath();
+        if (!File.Exists(path))
+        {
+            return;
+        }
+
+        foreach (var line in File.ReadLines(path).Where(line => !string.IsNullOrWhiteSpace(line)))
+        {
+            var runnerEvent = JsonSerializer.Deserialize<RunnerEventEnvelope>(line, RunnerProtocolJson.Options);
+            if (runnerEvent is not null)
+            {
+                _events.Add(runnerEvent);
+            }
+        }
+    }
+
+    private void LoadContentMetadata()
+    {
+        var root = ContentRoot();
+        if (!Directory.Exists(root))
+        {
+            return;
+        }
+
+        foreach (var path in Directory.EnumerateFiles(root, "*.json"))
+        {
+            var contentId = Path.GetFileNameWithoutExtension(path);
+            var blobPath = ContentBlobPath(contentId);
+            var contentRef = JsonSerializer.Deserialize<ClaimCheckContentRef>(File.ReadAllText(path), RunnerProtocolJson.Options);
+            if (contentRef is not null && File.Exists(blobPath))
+            {
+                _content[contentId] = new StoredClaimCheckContent(contentRef, File.ReadAllBytes(blobPath));
+            }
+        }
+    }
+
+    private void LoadRunnerHeartbeats()
+    {
+        var root = RunnerHeartbeatRoot();
+        if (!Directory.Exists(root))
+        {
+            return;
+        }
+
+        foreach (var path in Directory.EnumerateFiles(root, "*.json"))
+        {
+            var heartbeat = JsonSerializer.Deserialize<RunnerHeartbeat>(File.ReadAllText(path), RunnerProtocolJson.Options);
+            if (heartbeat is not null)
+            {
+                _runnerHeartbeats[heartbeat.RunnerId] = heartbeat;
+            }
+        }
+    }
+
+    private string CommandRoot() => Path.Combine(_runtimeRoot, "runner", "commands");
+    private string CommandPath(string commandId) => Path.Combine(CommandRoot(), $"{commandId}.json");
+    private string RunnerEventsPath() => Path.Combine(_runtimeRoot, "runner", "events.jsonl");
+    private string RunnerHeartbeatRoot() => Path.Combine(_runtimeRoot, "runner", "runners");
+    private string RunnerHeartbeatPath(string runnerId) => Path.Combine(RunnerHeartbeatRoot(), $"{runnerId}.json");
+    private string ContentRoot() => Path.Combine(_runtimeRoot, "content");
+    private string ContentBlobPath(string contentId) => Path.Combine(ContentRoot(), $"{contentId}.bin");
+    private string ContentMetadataPath(string contentId) => Path.Combine(ContentRoot(), $"{contentId}.json");
+
+    private static async Task WriteJsonAsync<T>(string path, T value, CancellationToken cancellationToken)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        await File.WriteAllTextAsync(path, JsonSerializer.Serialize(value, RunnerProtocolJson.Options), cancellationToken);
+    }
+
+    private static async Task<T> ReadJsonAsync<T>(string path, CancellationToken cancellationToken)
+    {
+        var json = await File.ReadAllTextAsync(path, cancellationToken);
+        return JsonSerializer.Deserialize<T>(json, RunnerProtocolJson.Options)
+            ?? throw new InvalidDataException($"{path} did not contain a valid {typeof(T).Name}.");
+    }
+
+    private static JsonSerializerOptions JsonLineOptions { get; } = new(RunnerProtocolJson.Options)
+    {
+        WriteIndented = false
+    };
 }
 
 public enum RunnerCommandMutationStatus
