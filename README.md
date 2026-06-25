@@ -48,6 +48,13 @@ uv run lamplighter-opencode   # -> Welcome to Lamplighter for OpenCode
 `make setup` depends on `make install-deps`, so a single `make setup` is enough
 for a fresh clone.
 
+## Chat Through Harness POC
+
+The end-to-end ASP.NET + React POC lives in
+[`poc/chat-through-harness`](poc/chat-through-harness/README.md). Its README
+documents local `.env` usage, production secret injection expectations, and how
+the harness isolates OpenCode from user-global configuration.
+
 ### Running the CLI
 
 After dependencies are installed, the CLI can be run three ways:
