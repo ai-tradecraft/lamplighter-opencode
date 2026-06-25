@@ -13,11 +13,17 @@ public sealed class CliRunnerCommandHandlerTests
     {
         var contentRef = new ClaimCheckContentRef("tradecraft://content/spec_1", "sha", "application/json", 2);
         var api = new FakeRunnerApiClient("""{"agent_session_id":"session_1","workspace_ref":"/tmp/workspace"}""");
-        var process = new FakeHarnessProcessRunner(new ProcessOutput(
-            Command: "uv run lamplighter-opencode prepare-session",
-            ExitCode: 0,
-            Stdout: """{"status":"ready"}""",
-            Stderr: ""));
+        var process = new FakeHarnessProcessRunner(
+            new ProcessOutput(
+                Command: "uv run lamplighter-opencode prepare-session",
+                ExitCode: 0,
+                Stdout: """{"status":"prepared"}""",
+                Stderr: ""),
+            new ProcessOutput(
+                Command: "uv run lamplighter-opencode start-session",
+                ExitCode: 0,
+                Stdout: """{"status":"ready","endpoint":"http://127.0.0.1:4097"}""",
+                Stderr: ""));
         var handler = new CliRunnerCommandHandler(
             api,
             process,
@@ -39,12 +45,25 @@ public sealed class CliRunnerCommandHandlerTests
         var result = await handler.HandleAsync(command, CancellationToken.None);
 
         Assert.Equal(RunnerCommandStatuses.Completed, result.Status);
-        Assert.Equal("uv", process.FileName);
-        Assert.Contains("prepare-session", process.Arguments);
-        Assert.Contains("--spec", process.Arguments);
+        Assert.Collection(
+            process.Invocations,
+            invocation =>
+            {
+                Assert.Equal("uv", invocation.FileName);
+                Assert.Contains("prepare-session", invocation.Arguments);
+                Assert.Contains("--spec", invocation.Arguments);
+                Assert.Contains("--runtime-root", invocation.Arguments);
+            },
+            invocation =>
+            {
+                Assert.Equal("uv", invocation.FileName);
+                Assert.Contains("start-session", invocation.Arguments);
+                Assert.Contains("--session", invocation.Arguments);
+                Assert.Contains("--runtime-root", invocation.Arguments);
+            });
         Assert.Single(api.PublishedEvents);
         Assert.Equal(RunnerEventTypes.AgentSessionReady, api.PublishedEvents.Single().Type);
-        Assert.Equal("application/vnd.tradecraft.prepare-session-result+json", api.Uploads.Single().ContentType);
+        Assert.Equal("application/vnd.tradecraft.start-session-result+json", api.Uploads.Single().ContentType);
     }
 
     [Fact]
@@ -90,18 +109,29 @@ public sealed class CliRunnerCommandHandlerTests
         return Path.Combine(Path.GetTempPath(), Ids.New("runner_handler"));
     }
 
-    private sealed class FakeHarnessProcessRunner(ProcessOutput output) : IHarnessProcessRunner
+    private sealed class FakeHarnessProcessRunner : IHarnessProcessRunner
     {
+        private readonly Queue<ProcessOutput> _outputs;
+
         public string FileName { get; private set; } = "";
         public string[] Arguments { get; private set; } = [];
+        public List<ProcessInvocation> Invocations { get; } = [];
+
+        public FakeHarnessProcessRunner(params ProcessOutput[] outputs)
+        {
+            _outputs = new Queue<ProcessOutput>(outputs);
+        }
 
         public Task<ProcessOutput> RunAsync(string fileName, string[] arguments, CancellationToken cancellationToken)
         {
             FileName = fileName;
             Arguments = arguments;
-            return Task.FromResult(output);
+            Invocations.Add(new ProcessInvocation(fileName, arguments));
+            return Task.FromResult(_outputs.Dequeue());
         }
     }
+
+    private sealed record ProcessInvocation(string FileName, string[] Arguments);
 
     private sealed class FakeRunnerApiClient(string payload) : IRunnerApiClient
     {

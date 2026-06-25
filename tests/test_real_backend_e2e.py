@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 
 import pytest
 from typer.testing import CliRunner
@@ -32,8 +33,9 @@ def test_real_backend_returns_deterministic_math_result(tmp_path, monkeypatch) -
 
     prompt, expected_answer = deterministic_math_prompt()
     session_id = "session_real_backend_e2e"
+    runtime_root = tmp_path / ".agent-runtime"
     spec_path = tmp_path / "spec.json"
-    workspace = tmp_path / session_id / "workspace"
+    workspace = runtime_root / "sessions" / session_id / "workspace"
     request_path = workspace.parent / "request.json"
 
     spec_path.write_text(
@@ -50,8 +52,17 @@ def test_real_backend_returns_deterministic_math_result(tmp_path, monkeypatch) -
         ),
         encoding="utf-8",
     )
-    prepare = runner.invoke(app, ["prepare-session", "--spec", str(spec_path), "--json"])
+    prepare = runner.invoke(
+        app,
+        ["prepare-session", "--spec", str(spec_path), "--runtime-root", str(runtime_root), "--json"],
+    )
     assert prepare.exit_code == 0, prepare.stdout
+    start = runner.invoke(
+        app,
+        ["start-session", "--session", session_id, "--runtime-root", str(runtime_root), "--json"],
+    )
+    assert start.exit_code == 0, start.stdout
+    server_metadata = json.loads(start.stdout)
     request_path.write_text(
         json.dumps(
             {
@@ -64,9 +75,13 @@ def test_real_backend_returns_deterministic_math_result(tmp_path, monkeypatch) -
         encoding="utf-8",
     )
 
-    submit = runner.invoke(app, ["submit-turn", "--session", session_id, "--request", str(request_path), "--json"])
-    assert submit.exit_code == 0, submit.stdout
+    try:
+        submit = runner.invoke(app, ["submit-turn", "--session", session_id, "--request", str(request_path), "--json"])
+        assert submit.exit_code == 0, submit.stdout
 
-    result = json.loads(submit.stdout)
-    assert result["status"] == "completed", result
-    assert result["message"].strip() == expected_answer
+        result = json.loads(submit.stdout)
+        assert result["status"] == "completed", result
+        assert result["message"].strip() == expected_answer
+    finally:
+        if server_metadata.get("pid"):
+            os.kill(int(server_metadata["pid"]), signal.SIGTERM)

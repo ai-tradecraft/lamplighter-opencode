@@ -1,7 +1,11 @@
 """Tests for `lamplighter_opencode` package."""
 
+import io
 import json
-import subprocess
+import urllib.error
+import urllib.parse
+import urllib.request
+from email.message import Message
 
 from typer.testing import CliRunner
 
@@ -227,6 +231,59 @@ def test_project_only_opencode_environment_is_session_local(tmp_path, monkeypatc
     assert isolated_opencode_environment(root)["HOME"] == str(root / "home")
 
 
+def test_submit_turn_uses_ready_opencode_server_metadata(tmp_path, monkeypatch) -> None:
+    """Real backend submission uses opencode serve HTTP instead of opencode run."""
+    root = tmp_path / "session_1"
+    workspace = root / "workspace"
+    workspace.mkdir(parents=True)
+    (root / "opencode-server.json").write_text(
+        json.dumps(
+            {
+                "status": "ready",
+                "endpoint": "http://127.0.0.1:4097",
+                "workspace": str(workspace),
+                "auth": {"username": "opencode", "password": "test-password"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    request = AgentTurnRequest(
+        id="turn_1",
+        agent_session_id="session_1",
+        type="prompt_response",
+        instruction="hello",
+    )
+    observed_urls = []
+
+    def fake_urlopen(http_request, timeout=60):  # noqa: ANN001, ANN202
+        observed_urls.append(http_request.full_url)
+        body = json.loads(http_request.data.decode("utf-8"))
+        assert http_request.headers["Authorization"].startswith("Basic ")
+        if http_request.full_url.startswith("http://127.0.0.1:4097/session?"):
+            assert body["title"] == "Lamplighter session_1"
+            return _JsonResponse({"id": "oc_session_1"})
+        if http_request.full_url.startswith("http://127.0.0.1:4097/session/oc_session_1/message?"):
+            assert body["parts"] == [{"type": "text", "text": "hello"}]
+            return _JsonResponse({"info": {"id": "message_1"}, "parts": [{"type": "text", "text": "server reply"}]})
+        raise AssertionError(f"Unexpected URL {http_request.full_url}")
+
+    monkeypatch.setenv("LAMPLIGHTER_OPENCODE_USE_REAL_BACKEND", "1")
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    result = submit_turn(request, root)
+
+    assert result.status == "completed"
+    assert result.message == "server reply"
+    assert result.commands_observed == ["POST /session", "POST /session/oc_session_1/message"]
+    encoded_workspace = urllib.parse.quote(str(workspace), safe="")
+    assert observed_urls == [
+        f"http://127.0.0.1:4097/session?directory={encoded_workspace}",
+        f"http://127.0.0.1:4097/session/oc_session_1/message?directory={encoded_workspace}",
+    ]
+    metadata = json.loads((root / "opencode-server.json").read_text(encoding="utf-8"))
+    assert metadata["opencode_session_id"] == "oc_session_1"
+
+
 def test_azure_openai_endpoint_is_normalized(monkeypatch) -> None:
     """Azure resource root endpoints are normalized to the OpenCode base path."""
     monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://example-resource.openai.azure.com/")
@@ -237,9 +294,22 @@ def test_azure_openai_endpoint_is_normalized(monkeypatch) -> None:
 
 
 def test_submit_turn_returns_failure_response_for_backend_error(tmp_path, monkeypatch) -> None:
-    """A non-zero OpenCode process becomes a normalized failed AgentTurnResult."""
+    """OpenCode server HTTP failures become normalized failed AgentTurnResult values."""
     root = tmp_path / "session_1"
-    (root / "workspace").mkdir(parents=True)
+    workspace = root / "workspace"
+    workspace.mkdir(parents=True)
+    (root / "opencode-server.json").write_text(
+        json.dumps(
+            {
+                "status": "ready",
+                "endpoint": "http://127.0.0.1:4097",
+                "workspace": str(workspace),
+                "auth": {"username": "opencode", "password": "test-password"},
+                "opencode_session_id": "oc_session_1",
+            }
+        ),
+        encoding="utf-8",
+    )
     request = AgentTurnRequest(
         id="turn_1",
         agent_session_id="session_1",
@@ -247,19 +317,36 @@ def test_submit_turn_returns_failure_response_for_backend_error(tmp_path, monkey
         instruction="hello",
     )
 
-    def fake_run(*args, **kwargs):  # noqa: ANN002, ANN003
-        return subprocess.CompletedProcess(args=args, returncode=1, stdout="", stderr="Resource not found")
+    def fake_urlopen(http_request, timeout=60):  # noqa: ANN001, ANN202, ARG001
+        raise urllib.error.HTTPError(
+            url=http_request.full_url,
+            code=401,
+            msg="Unauthorized",
+            hdrs=Message(),
+            fp=io.BytesIO(b"invalid api key"),
+        )
 
     monkeypatch.setenv("LAMPLIGHTER_OPENCODE_USE_REAL_BACKEND", "1")
-    monkeypatch.setenv("LAMPLIGHTER_OPENCODE_CONFIG_MODE", "project-only")
-    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "test-api-key")
-    monkeypatch.setenv("AZURE_OPENAI_DEPLOYMENT", "deployment")
-    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://example-resource.openai.azure.com/")
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
     result = submit_turn(request, root)
 
     assert result.status == "failed"
     assert result.failure_report is not None
-    assert result.failure_report["summary"] == "OpenCode returned a non-zero exit code."
-    assert "Resource not found" in str(result.failure_report["detail"])
+    assert result.failure_report["summary"] == "OpenCode server request failed."
+    assert "HTTP 401" in str(result.failure_report["detail"])
+    assert "invalid api key" in str(result.failure_report["detail"])
+
+
+class _JsonResponse:
+    def __init__(self, value: object) -> None:
+        self._payload = json.dumps(value).encode("utf-8")
+
+    def __enter__(self) -> "_JsonResponse":
+        return self
+
+    def __exit__(self, *args) -> None:  # noqa: ANN002
+        return None
+
+    def read(self) -> bytes:
+        return self._payload

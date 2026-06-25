@@ -55,17 +55,33 @@ public sealed class CliRunnerCommandHandler(
         var specPath = Path.Combine(sessionRoot, "agent-session-spec.json");
         await File.WriteAllTextAsync(specPath, payload, cancellationToken);
 
-        var output = await processRunner.RunAsync(
+        var prepareOutput = await processRunner.RunAsync(
             "uv",
-            ["run", "lamplighter-opencode", "prepare-session", "--spec", specPath, "--json"],
+            ["run", "lamplighter-opencode", "prepare-session", "--spec", specPath, "--runtime-root", _options.RuntimeRoot, "--json"],
+            cancellationToken);
+
+        if (prepareOutput.ExitCode != 0)
+        {
+            return await CompleteFromProcessAsync(
+                command,
+                prepareOutput,
+                successEventType: RunnerEventTypes.AgentSessionReady,
+                failureEventType: RunnerEventTypes.AgentSessionFailed,
+                successContentType: "application/vnd.tradecraft.prepare-session-result+json",
+                cancellationToken);
+        }
+
+        var startOutput = await processRunner.RunAsync(
+            "uv",
+            ["run", "lamplighter-opencode", "start-session", "--session", command.AgentSessionId, "--runtime-root", _options.RuntimeRoot, "--json"],
             cancellationToken);
 
         return await CompleteFromProcessAsync(
             command,
-            output,
+            startOutput,
             successEventType: RunnerEventTypes.AgentSessionReady,
             failureEventType: RunnerEventTypes.AgentSessionFailed,
-            successContentType: "application/vnd.tradecraft.prepare-session-result+json",
+            successContentType: "application/vnd.tradecraft.start-session-result+json",
             cancellationToken);
     }
 

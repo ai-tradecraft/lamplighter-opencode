@@ -16,13 +16,17 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import quote, urlencode, urlparse, urlunparse
 
 from lamplighter_opencode.contracts.models import AgentSessionSpec, AgentTurnRequest, AgentTurnResult, RuntimeEvent
 from lamplighter_opencode.contracts.validation import validate_contract
 from lamplighter_opencode.runtime.events import append_runtime_event
 
 OPENCODE_CONFIG_MODES = {"inherit-global", "project-only", "managed"}
+
+
+class OpenCodeServerError(RuntimeError):
+    """Raised when the local OpenCode server API returns an unusable response."""
 
 
 @dataclass(frozen=True)
@@ -114,22 +118,9 @@ def submit_turn(request: AgentTurnRequest, root: Path) -> AgentTurnResult:
             message=f"Fake OpenCode response for `{request.instruction}`.",
         )
 
-    mode = opencode_config_mode()
-    if mode != "inherit-global":
-        validate_real_backend_environment()
-        materialize_opencode_config(root)
-    command, observed_command = opencode_run_command(root, request.instruction, mode)
     try:
-        completed = subprocess.run(
-            command,
-            cwd=root / "workspace",
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=300,
-            env=opencode_environment(root, mode),
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+        return submit_turn_to_opencode_server(request, root, started_at)
+    except (OSError, OpenCodeServerError, ValueError, json.JSONDecodeError) as exc:
         return AgentTurnResult(
             id=f"result_{uuid.uuid4().hex}",
             agent_session_id=request.agent_session_id,
@@ -137,35 +128,69 @@ def submit_turn(request: AgentTurnRequest, root: Path) -> AgentTurnResult:
             status="failed",
             started_at=started_at,
             ended_at=datetime.now(UTC).isoformat(),
-            message="OpenCode invocation failed.",
-            failure_report={"summary": "OpenCode invocation failed.", "detail": str(exc)},
+            message="OpenCode server request failed.",
+            failure_report={"summary": "OpenCode server request failed.", "detail": str(exc)},
         )
 
-    observed = [observed_command]
-    if completed.returncode != 0:
-        return AgentTurnResult(
-            id=f"result_{uuid.uuid4().hex}",
-            agent_session_id=request.agent_session_id,
-            request_id=request.id,
-            status="failed",
-            started_at=started_at,
-            ended_at=datetime.now(UTC).isoformat(),
-            message=completed.stdout.strip() or "OpenCode returned a non-zero exit code.",
-            commands_observed=observed,
-            failure_report={
-                "summary": "OpenCode returned a non-zero exit code.",
-                "detail": completed.stderr[-4000:],
-            },
-        )
 
+def submit_turn_to_opencode_server(
+    request: AgentTurnRequest, root: Path, started_at: str | None = None
+) -> AgentTurnResult:
+    """Submit one turn through a ready local opencode serve HTTP endpoint."""
+    started = started_at or datetime.now(UTC).isoformat()
+    root = root.resolve()
+    metadata_path = root / "opencode-server.json"
+    metadata = _read_json(metadata_path)
+    workspace = _metadata_string(metadata, "workspace")
+    status = _metadata_string(metadata, "status")
+    if status != "ready":
+        raise OpenCodeServerError(f"OpenCode server is not ready for {request.agent_session_id}: {status}")
+
+    observed = []
+    opencode_session_id = _optional_metadata_string(metadata, "opencode_session_id")
+    if opencode_session_id is None:
+        session_payload = {
+            "title": f"Lamplighter {request.agent_session_id}",
+        }
+        session = _request_json(
+            metadata,
+            "POST",
+            "/session",
+            query={"directory": workspace},
+            body=session_payload,
+        )
+        opencode_session_id = _metadata_string(session, "id")
+        metadata["opencode_session_id"] = opencode_session_id
+        metadata["opencode_session_created_at"] = datetime.now(UTC).isoformat()
+        _write_json(metadata_path, metadata)
+        observed.append("POST /session")
+
+    prompt = _request_json(
+        metadata,
+        "POST",
+        f"/session/{quote(opencode_session_id, safe='')}/message",
+        query={"directory": workspace},
+        body={
+            "parts": [
+                {
+                    "type": "text",
+                    "text": request.instruction,
+                }
+            ],
+        },
+        timeout=300,
+    )
+    observed.append(f"POST /session/{opencode_session_id}/message")
+
+    message = _extract_text_response(prompt)
     return AgentTurnResult(
         id=f"result_{uuid.uuid4().hex}",
         agent_session_id=request.agent_session_id,
         request_id=request.id,
         status="completed",
-        started_at=started_at,
+        started_at=started,
         ended_at=datetime.now(UTC).isoformat(),
-        message=completed.stdout.strip(),
+        message=message,
         commands_observed=observed,
     )
 
@@ -537,6 +562,100 @@ def _wait_for_opencode_health(endpoint: str, password: str, timeout_seconds: flo
             time.sleep(0.2)
 
     raise TimeoutError(f"OpenCode server did not become healthy before timeout: {last_error}")
+
+
+def _request_json(
+    metadata: dict[str, Any],
+    method: str,
+    path: str,
+    *,
+    query: dict[str, str] | None = None,
+    body: object | None = None,
+    timeout: float = 60,
+) -> dict[str, Any]:
+    endpoint = _metadata_string(metadata, "endpoint").rstrip("/")
+    url = f"{endpoint}{path}"
+    if query:
+        url = f"{url}?{urlencode(query)}"
+
+    payload = None if body is None else json.dumps(body).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=payload,
+        headers={
+            "Accept": "application/json",
+            "Authorization": _opencode_auth_header(metadata),
+            "Content-Type": "application/json",
+        },
+        method=method,
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            value = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[-2000:]
+        raise OpenCodeServerError(f"{method} {path} failed with HTTP {exc.code}: {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise OpenCodeServerError(f"{method} {path} failed: {exc}") from exc
+
+    if not isinstance(value, dict):
+        raise OpenCodeServerError(f"{method} {path} returned a non-object JSON response.")
+    return value
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    try:
+        with path.open(encoding="utf-8") as input_file:
+            value = json.load(input_file)
+    except FileNotFoundError as exc:
+        raise OpenCodeServerError(f"{path} does not exist. Run start-session before submit-turn.") from exc
+
+    if not isinstance(value, dict):
+        raise OpenCodeServerError(f"{path} must contain a JSON object.")
+    return value
+
+
+def _metadata_string(value: dict[str, Any], key: str) -> str:
+    item = value.get(key)
+    if not isinstance(item, str) or not item:
+        raise OpenCodeServerError(f"OpenCode server metadata is missing string field {key!r}.")
+    return item
+
+
+def _optional_metadata_string(value: dict[str, Any], key: str) -> str | None:
+    item = value.get(key)
+    if item is None:
+        return None
+    if not isinstance(item, str) or not item:
+        raise OpenCodeServerError(f"OpenCode server metadata has invalid string field {key!r}.")
+    return item
+
+
+def _opencode_auth_header(metadata: dict[str, Any]) -> str:
+    auth = metadata.get("auth")
+    if not isinstance(auth, dict):
+        raise OpenCodeServerError("OpenCode server metadata is missing auth details.")
+    username = auth.get("username")
+    password = auth.get("password")
+    if not isinstance(username, str) or not isinstance(password, str) or not username or not password:
+        raise OpenCodeServerError("OpenCode server metadata auth details are incomplete.")
+    token = b64encode(f"{username}:{password}".encode()).decode("ascii")
+    return f"Basic {token}"
+
+
+def _extract_text_response(value: dict[str, Any]) -> str:
+    parts = value.get("parts")
+    if not isinstance(parts, list):
+        raise OpenCodeServerError("OpenCode prompt response did not include parts.")
+
+    text_parts = [
+        part["text"]
+        for part in parts
+        if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str)
+    ]
+    if text_parts:
+        return "\n".join(text_parts).strip()
+    return json.dumps(value, sort_keys=True)
 
 
 def _observed_command(command: list[str]) -> str:
