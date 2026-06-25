@@ -1,7 +1,9 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using ChatThroughHarness.Protocol;
 using Microsoft.AspNetCore.SignalR;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -23,6 +25,7 @@ builder.Services.AddCors(options =>
 builder.Services.AddSignalR();
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<AgentSessionStore>();
+builder.Services.AddSingleton<RunnerControlStore>();
 builder.Services.AddSingleton<HarnessClientFactory>();
 builder.Services.AddSingleton<IHarnessClient>(sp => sp.GetRequiredService<HarnessClientFactory>().Create());
 
@@ -30,6 +33,103 @@ var app = builder.Build();
 
 app.UseCors();
 app.MapHub<AgentSessionHub>("/hubs/agent-sessions");
+
+app.MapGet("/api/runner/commands", async (
+    string runnerId,
+    string? wait,
+    RunnerControlStore runnerStore,
+    CancellationToken cancellationToken) =>
+{
+    var deadline = DateTimeOffset.UtcNow + ParseLongPollWait(wait);
+    while (!cancellationToken.IsCancellationRequested)
+    {
+        var commands = await runnerStore.GetAvailableCommandsAsync(runnerId, cancellationToken);
+        if (commands.Count > 0 || DateTimeOffset.UtcNow >= deadline)
+        {
+            return Results.Ok(commands);
+        }
+
+        await Task.Delay(TimeSpan.FromMilliseconds(250), cancellationToken);
+    }
+
+    return Results.Ok(Array.Empty<RunnerCommandEnvelope>());
+});
+
+app.MapPost("/api/runner/commands/{commandId}/claim", async (
+    string commandId,
+    ClaimRunnerCommandRequest request,
+    RunnerControlStore runnerStore,
+    CancellationToken cancellationToken) =>
+{
+    var result = await runnerStore.ClaimCommandAsync(commandId, request, cancellationToken);
+    return result.Status switch
+    {
+        RunnerCommandMutationStatus.NotFound => Results.NotFound(),
+        RunnerCommandMutationStatus.Conflict => Results.Conflict(new { message = result.Message }),
+        _ => Results.Ok(result.Command)
+    };
+});
+
+app.MapPost("/api/runner/commands/{commandId}/complete", async (
+    string commandId,
+    CompleteRunnerCommandRequest request,
+    RunnerControlStore runnerStore,
+    CancellationToken cancellationToken) =>
+{
+    var result = await runnerStore.CompleteCommandAsync(commandId, request, cancellationToken);
+    return result.Status switch
+    {
+        RunnerCommandMutationStatus.NotFound => Results.NotFound(),
+        RunnerCommandMutationStatus.Conflict => Results.Conflict(new { message = result.Message }),
+        _ => Results.Ok(result.Command)
+    };
+});
+
+app.MapPost("/api/runner/events", async (
+    RunnerEventEnvelope runnerEvent,
+    RunnerControlStore runnerStore,
+    AgentSessionStore sessionStore,
+    IHubContext<AgentSessionHub> hub,
+    CancellationToken cancellationToken) =>
+{
+    await runnerStore.AddEventAsync(runnerEvent, cancellationToken);
+    await PublishAsync(
+        sessionStore,
+        hub,
+        runnerEvent.AgentSessionId,
+        null,
+        runnerEvent.Type,
+        runnerEvent,
+        cancellationToken);
+    return Results.Accepted();
+});
+
+app.MapPost("/api/runner/content", async (
+    ClaimCheckContentUploadRequest request,
+    RunnerControlStore runnerStore,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        var response = await runnerStore.SaveContentAsync(request, cancellationToken);
+        return Results.Created(response.ContentRef.Uri, response);
+    }
+    catch (InvalidDataException ex)
+    {
+        return Results.BadRequest(new { message = ex.Message });
+    }
+});
+
+app.MapGet("/api/runner/content/{contentId}", async (
+    string contentId,
+    RunnerControlStore runnerStore,
+    CancellationToken cancellationToken) =>
+{
+    var content = await runnerStore.GetContentAsync(contentId, cancellationToken);
+    return content is null
+        ? Results.NotFound()
+        : Results.File(content.Value.Bytes, content.Value.ContentType);
+});
 
 app.MapPost("/api/agent-sessions", async (
     CreateAgentSessionRequest request,
@@ -170,6 +270,23 @@ app.MapPost("/api/agent-sessions/{sessionId}/cancel", async (
 });
 
 app.Run();
+
+static TimeSpan ParseLongPollWait(string? wait)
+{
+    if (string.IsNullOrWhiteSpace(wait))
+    {
+        return TimeSpan.FromSeconds(30);
+    }
+
+    if (wait.EndsWith('s') && int.TryParse(wait[..^1], out var seconds))
+    {
+        return TimeSpan.FromSeconds(Math.Clamp(seconds, 0, 120));
+    }
+
+    return int.TryParse(wait, out seconds)
+        ? TimeSpan.FromSeconds(Math.Clamp(seconds, 0, 120))
+        : TimeSpan.FromSeconds(30);
+}
 
 static async Task PublishAsync(
     AgentSessionStore store,
@@ -403,6 +520,158 @@ public sealed class AgentSessionStore
     {
         await File.WriteAllTextAsync(path, JsonSerializer.Serialize(value, JsonDefaults.Options), cancellationToken);
     }
+}
+
+public sealed class RunnerControlStore
+{
+    private readonly ConcurrentDictionary<string, RunnerCommandEnvelope> _commands = new();
+    private readonly ConcurrentBag<RunnerEventEnvelope> _events = [];
+    private readonly ConcurrentDictionary<string, StoredClaimCheckContent> _content = new();
+
+    public Task EnqueueCommandAsync(RunnerCommandEnvelope command, CancellationToken cancellationToken)
+    {
+        _commands[command.Id] = command;
+        return Task.CompletedTask;
+    }
+
+    public Task<IReadOnlyCollection<RunnerCommandEnvelope>> GetAvailableCommandsAsync(string runnerId, CancellationToken cancellationToken)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var commands = _commands.Values
+            .Where(command => command.Status == RunnerCommandStatuses.Pending)
+            .Where(command => command.AvailableAt <= now)
+            .Where(command => command.RunnerId is null || command.RunnerId == runnerId)
+            .Where(command => command.Lease is null || command.Lease.ExpiresAt <= now)
+            .OrderBy(command => command.CreatedAt)
+            .ToArray();
+        return Task.FromResult<IReadOnlyCollection<RunnerCommandEnvelope>>(commands);
+    }
+
+    public Task<RunnerCommandMutationResult> ClaimCommandAsync(
+        string commandId,
+        ClaimRunnerCommandRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (!_commands.TryGetValue(commandId, out var command))
+        {
+            return Task.FromResult(RunnerCommandMutationResult.NotFound());
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        if (command.Lease is not null && command.Lease.ExpiresAt > now && command.Lease.RunnerId != request.RunnerId)
+        {
+            return Task.FromResult(RunnerCommandMutationResult.Conflict("Command is leased by another runner."));
+        }
+
+        if (command.Status is RunnerCommandStatuses.Completed or RunnerCommandStatuses.Cancelled)
+        {
+            return Task.FromResult(RunnerCommandMutationResult.Conflict($"Command is already {command.Status}."));
+        }
+
+        var lease = new RunnerCommandLease(
+            LeaseId: Ids.New("lease"),
+            RunnerId: request.RunnerId,
+            ClaimedAt: now,
+            ExpiresAt: now.AddSeconds(Math.Clamp(request.LeaseSeconds, 1, 3600)),
+            Attempt: (command.Lease?.Attempt ?? 0) + 1);
+        var claimed = command with
+        {
+            RunnerId = request.RunnerId,
+            Status = RunnerCommandStatuses.Claimed,
+            Lease = lease
+        };
+        _commands[commandId] = claimed;
+        return Task.FromResult(RunnerCommandMutationResult.Ok(claimed));
+    }
+
+    public Task<RunnerCommandMutationResult> CompleteCommandAsync(
+        string commandId,
+        CompleteRunnerCommandRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (!_commands.TryGetValue(commandId, out var command))
+        {
+            return Task.FromResult(RunnerCommandMutationResult.NotFound());
+        }
+
+        if (command.Lease is null || command.Lease.LeaseId != request.LeaseId || command.Lease.RunnerId != request.RunnerId)
+        {
+            return Task.FromResult(RunnerCommandMutationResult.Conflict("Command lease does not match completion request."));
+        }
+
+        var completed = command with
+        {
+            Status = request.Status,
+            Lease = null
+        };
+        _commands[commandId] = completed;
+        return Task.FromResult(RunnerCommandMutationResult.Ok(completed));
+    }
+
+    public Task AddEventAsync(RunnerEventEnvelope runnerEvent, CancellationToken cancellationToken)
+    {
+        _events.Add(runnerEvent);
+        return Task.CompletedTask;
+    }
+
+    public Task<IReadOnlyCollection<RunnerEventEnvelope>> GetEventsAsync(CancellationToken cancellationToken)
+    {
+        return Task.FromResult<IReadOnlyCollection<RunnerEventEnvelope>>(_events.OrderBy(e => e.CreatedAt).ToArray());
+    }
+
+    public Task<ClaimCheckContentUploadResponse> SaveContentAsync(
+        ClaimCheckContentUploadRequest request,
+        CancellationToken cancellationToken)
+    {
+        var bytes = Convert.FromBase64String(request.ContentBase64);
+        var actualSha = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+        if (!string.Equals(actualSha, request.Sha256, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException("Content sha256 does not match uploaded bytes.");
+        }
+
+        if (bytes.LongLength != request.Length)
+        {
+            throw new InvalidDataException("Content length does not match uploaded bytes.");
+        }
+
+        var contentId = Ids.New("content");
+        var contentRef = new ClaimCheckContentRef(
+            Uri: $"tradecraft://content/{contentId}",
+            Sha256: actualSha,
+            ContentType: request.ContentType,
+            Length: bytes.LongLength);
+        _content[contentId] = new StoredClaimCheckContent(contentRef, bytes);
+        return Task.FromResult(new ClaimCheckContentUploadResponse(contentRef));
+    }
+
+    public Task<StoredClaimCheckContent?> GetContentAsync(string contentId, CancellationToken cancellationToken)
+    {
+        _content.TryGetValue(contentId, out var content);
+        return Task.FromResult<StoredClaimCheckContent?>(content);
+    }
+}
+
+public enum RunnerCommandMutationStatus
+{
+    Ok,
+    NotFound,
+    Conflict
+}
+
+public sealed record RunnerCommandMutationResult(
+    RunnerCommandMutationStatus Status,
+    RunnerCommandEnvelope? Command,
+    string? Message)
+{
+    public static RunnerCommandMutationResult Ok(RunnerCommandEnvelope command) => new(RunnerCommandMutationStatus.Ok, command, null);
+    public static RunnerCommandMutationResult NotFound() => new(RunnerCommandMutationStatus.NotFound, null, null);
+    public static RunnerCommandMutationResult Conflict(string message) => new(RunnerCommandMutationStatus.Conflict, null, message);
+}
+
+public readonly record struct StoredClaimCheckContent(ClaimCheckContentRef ContentRef, byte[] Bytes)
+{
+    public string ContentType => ContentRef.ContentType;
 }
 
 public static class RuntimePaths
