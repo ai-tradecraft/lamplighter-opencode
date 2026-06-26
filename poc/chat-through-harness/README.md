@@ -39,6 +39,12 @@ npm run dev
 Open the Vite URL shown in the client terminal, usually
 `http://127.0.0.1:5173`.
 
+The portal opens on the active controller list. The local runner reports its
+controller heartbeat and local agent inventory every few seconds. Select a
+controller to see its allocated agents, create a new agent from that
+controller, or open an existing agent to restore its chat transcript after a
+browser refresh.
+
 The browser-facing API enqueues commands for the local runner. For local runs,
 keep the API and runner pointed at the same `.agent-runtime/` folder under
 `poc/chat-through-harness/`.

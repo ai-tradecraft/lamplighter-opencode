@@ -7,6 +7,7 @@ namespace ChatThroughHarness.Runner;
 
 public sealed class RunnerWorker(
     IOptions<RunnerOptions> options,
+    IRunnerApiClient apiClient,
     RunnerCommandLoop commandLoop,
     ILogger<RunnerWorker> logger) : BackgroundService
 {
@@ -19,23 +20,34 @@ public sealed class RunnerWorker(
             _options.RunnerId,
             _options.OrchestratorBaseUri);
 
-        var registration = new RunnerRegistrationRequest(
+        var heartbeatTask = RunHeartbeatLoopAsync(stoppingToken);
+        var commandTask = commandLoop.RunAsync(stoppingToken);
+        await Task.WhenAll(heartbeatTask, commandTask);
+    }
+
+    private async Task RunHeartbeatLoopAsync(CancellationToken stoppingToken)
+    {
+        await PublishHeartbeatAsync(stoppingToken);
+        using var timer = new PeriodicTimer(_options.HeartbeatInterval);
+        while (await timer.WaitForNextTickAsync(stoppingToken))
+        {
+            await PublishHeartbeatAsync(stoppingToken);
+        }
+    }
+
+    private async Task PublishHeartbeatAsync(CancellationToken cancellationToken)
+    {
+        var agents = RunnerAgentInventory.Scan(_options.RuntimeRoot, DateTimeOffset.UtcNow);
+        var heartbeat = new RunnerHeartbeat(
             RunnerId: _options.RunnerId,
-            MachineName: Environment.MachineName,
-            Version: typeof(RunnerWorker).Assembly.GetName().Version?.ToString() ?? "0.0.0",
-            Capabilities:
-            [
-                "commands.long_poll",
-                "events.https_post",
-                "content.claim_check",
-                "opencode.serve"
-            ],
-            RegisteredAt: DateTimeOffset.UtcNow);
+            Status: "online",
+            ActiveCommandIds: [],
+            ObservedAt: DateTimeOffset.UtcNow,
+            Agents: agents);
 
+        await apiClient.UpsertHeartbeatAsync(heartbeat, cancellationToken);
         logger.LogInformation(
-            "Runner registration prepared with {CapabilityCount} capabilities.",
-            registration.Capabilities.Count);
-
-        await commandLoop.RunAsync(stoppingToken);
+            "Runner heartbeat published with {AgentCount} local agents.",
+            agents.Count);
     }
 }

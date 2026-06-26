@@ -105,6 +105,21 @@ app.MapPost("/api/runner/events", async (
     return Results.Accepted();
 });
 
+app.MapPost("/api/runner/heartbeat", async (
+    RunnerHeartbeat heartbeat,
+    RunnerControlStore runnerStore,
+    AgentSessionStore sessionStore,
+    CancellationToken cancellationToken) =>
+{
+    await runnerStore.UpsertRunnerHeartbeatAsync(heartbeat, cancellationToken);
+    foreach (var agent in heartbeat.Agents)
+    {
+        await sessionStore.UpsertInventorySessionAsync(heartbeat.RunnerId, agent, cancellationToken);
+    }
+
+    return Results.Accepted();
+});
+
 app.MapPost("/api/runner/content", async (
     ClaimCheckContentUploadRequest request,
     RunnerControlStore runnerStore,
@@ -132,6 +147,23 @@ app.MapGet("/api/runner/content/{contentId}", async (
         : Results.File(content.Value.Bytes, content.Value.ContentType);
 });
 
+app.MapGet("/api/agent-controllers", async (
+    RunnerControlStore runnerStore,
+    CancellationToken cancellationToken) =>
+{
+    var heartbeats = await runnerStore.GetRunnerHeartbeatsAsync(cancellationToken);
+    return Results.Ok(heartbeats.Select(AgentControllerRecord.FromHeartbeat).ToArray());
+});
+
+app.MapGet("/api/agent-controllers/{runnerId}", async (
+    string runnerId,
+    RunnerControlStore runnerStore,
+    CancellationToken cancellationToken) =>
+{
+    var heartbeat = await runnerStore.GetRunnerHeartbeatAsync(runnerId, cancellationToken);
+    return heartbeat is null ? Results.NotFound() : Results.Ok(AgentControllerRecord.FromHeartbeat(heartbeat));
+});
+
 app.MapPost("/api/agent-sessions", async (
     CreateAgentSessionRequest request,
     AgentSessionStore store,
@@ -150,7 +182,8 @@ app.MapPost("/api/agent-sessions", async (
         RunnerCommandTypes.PrepareAgentSession,
         payloadRef,
         correlationId: session.Id,
-        idempotencyKey: session.Id);
+        idempotencyKey: session.Id,
+        runnerId: request.ControllerId);
     await runnerStore.EnqueueCommandAsync(command, cancellationToken);
     await PublishAsync(store, hub, session.Id, null, "agent_session.command_queued", command, cancellationToken);
 
@@ -208,6 +241,15 @@ app.MapGet("/api/agent-sessions/{sessionId}/turns/{turnId}", async (
 {
     var turn = await store.GetTurnAsync(sessionId, turnId, cancellationToken);
     return turn is null ? Results.NotFound() : Results.Ok(turn);
+});
+
+app.MapGet("/api/agent-sessions/{sessionId}/turns", async (
+    string sessionId,
+    AgentSessionStore store,
+    CancellationToken cancellationToken) =>
+{
+    var turns = await store.GetTurnsAsync(sessionId, cancellationToken);
+    return Results.Ok(turns);
 });
 
 app.MapGet("/api/agent-sessions/{sessionId}/events", async (
@@ -603,6 +645,28 @@ public sealed class AgentSessionStore
         return Task.FromResult(session);
     }
 
+    public async Task UpsertInventorySessionAsync(
+        string runnerId,
+        RunnerAgentInventoryItem agent,
+        CancellationToken cancellationToken)
+    {
+        if (_sessions.TryGetValue(agent.AgentSessionId, out var existing))
+        {
+            var updated = existing with
+            {
+                ControllerId = runnerId,
+                Status = NormalizeAgentStatus(agent.Status),
+                ReadyAt = NormalizeAgentStatus(agent.Status) == "ready" ? existing.ReadyAt ?? agent.ObservedAt : existing.ReadyAt,
+                RuntimePath = agent.RuntimePath,
+                WorkspacePath = agent.WorkspacePath
+            };
+            await UpsertSessionAsync(updated, cancellationToken);
+            return;
+        }
+
+        await UpsertSessionAsync(AgentSessionRecord.FromInventory(runnerId, agent), cancellationToken);
+    }
+
     public async Task UpsertTurnAsync(AgentTurnRecord turn, CancellationToken cancellationToken)
     {
         _turns[TurnKey(turn.SessionId, turn.Id)] = turn;
@@ -618,6 +682,15 @@ public sealed class AgentSessionStore
     {
         _turns.TryGetValue(TurnKey(sessionId, turnId), out var turn);
         return Task.FromResult(turn);
+    }
+
+    public Task<IReadOnlyCollection<AgentTurnRecord>> GetTurnsAsync(string sessionId, CancellationToken cancellationToken)
+    {
+        var turns = _turns.Values
+            .Where(turn => turn.SessionId == sessionId)
+            .OrderBy(turn => turn.CreatedAt)
+            .ToArray();
+        return Task.FromResult<IReadOnlyCollection<AgentTurnRecord>>(turns);
     }
 
     public async Task AddEventAsync(RuntimeEventRecord runtimeEvent, CancellationToken cancellationToken)
@@ -640,6 +713,15 @@ public sealed class AgentSessionStore
     }
 
     private static string TurnKey(string sessionId, string turnId) => $"{sessionId}:{turnId}";
+
+    private static string NormalizeAgentStatus(string status)
+    {
+        return status switch
+        {
+            "planned" or "starting" => "preparing",
+            _ => status
+        };
+    }
 
     private static async Task WriteJsonAsync<T>(string path, T value, CancellationToken cancellationToken)
     {
@@ -844,6 +926,14 @@ public sealed class RunnerControlStore
         return Task.FromResult(heartbeat);
     }
 
+    public Task<IReadOnlyCollection<RunnerHeartbeat>> GetRunnerHeartbeatsAsync(CancellationToken cancellationToken)
+    {
+        var heartbeats = _runnerHeartbeats.Values
+            .OrderBy(heartbeat => heartbeat.RunnerId, StringComparer.Ordinal)
+            .ToArray();
+        return Task.FromResult<IReadOnlyCollection<RunnerHeartbeat>>(heartbeats);
+    }
+
     private void LoadCommands()
     {
         var root = CommandRoot();
@@ -991,12 +1081,13 @@ public static class RunnerCommandFactory
         string type,
         ClaimCheckContentRef payloadRef,
         string correlationId,
-        string idempotencyKey)
+        string idempotencyKey,
+        string? runnerId = null)
     {
         var now = DateTimeOffset.UtcNow;
         return new RunnerCommandEnvelope(
             Id: Ids.New("cmd"),
-            RunnerId: null,
+            RunnerId: runnerId,
             AgentSessionId: agentSessionId,
             Type: type,
             Status: RunnerCommandStatuses.Pending,
@@ -1009,12 +1100,29 @@ public static class RunnerCommandFactory
     }
 }
 
-public sealed record CreateAgentSessionRequest(string? Goal = null, string? BranchName = null);
+public sealed record CreateAgentSessionRequest(string? Goal = null, string? BranchName = null, string? ControllerId = null);
 public sealed record SubmitTurnRequest(string Prompt);
 public sealed record CancelSessionRequest(string? Reason);
 
+public sealed record AgentControllerRecord(
+    string RunnerId,
+    string Status,
+    DateTimeOffset ObservedAt,
+    IReadOnlyList<RunnerAgentInventoryItem> Agents)
+{
+    public static AgentControllerRecord FromHeartbeat(RunnerHeartbeat heartbeat)
+    {
+        return new AgentControllerRecord(
+            RunnerId: heartbeat.RunnerId,
+            Status: heartbeat.Status,
+            ObservedAt: heartbeat.ObservedAt,
+            Agents: heartbeat.Agents);
+    }
+}
+
 public sealed record AgentSessionRecord(
     string Id,
+    string? ControllerId,
     string Status,
     DateTimeOffset CreatedAt,
     DateTimeOffset? ReadyAt,
@@ -1033,6 +1141,7 @@ public sealed record AgentSessionRecord(
         var runtimePath = Path.Combine(runtimeRoot, "sessions", id);
         return new AgentSessionRecord(
             Id: id,
+            ControllerId: request.ControllerId,
             Status: "preparing",
             CreatedAt: DateTimeOffset.UtcNow,
             ReadyAt: null,
@@ -1042,6 +1151,29 @@ public sealed record AgentSessionRecord(
             WorkspacePath: Path.Combine(runtimePath, "workspace"),
             BackendKind: "opencode",
             BranchName: request.BranchName ?? "poc-chat-through-harness",
+            FailureSummary: null,
+            Diagnostics: null);
+    }
+
+    public static AgentSessionRecord FromInventory(string controllerId, RunnerAgentInventoryItem agent)
+    {
+        var status = agent.Status switch
+        {
+            "planned" or "starting" => "preparing",
+            _ => agent.Status
+        };
+        return new AgentSessionRecord(
+            Id: agent.AgentSessionId,
+            ControllerId: controllerId,
+            Status: status,
+            CreatedAt: agent.ObservedAt,
+            ReadyAt: status == "ready" ? agent.ObservedAt : null,
+            FailedAt: status == "failed" ? agent.ObservedAt : null,
+            EndedAt: null,
+            RuntimePath: agent.RuntimePath,
+            WorkspacePath: agent.WorkspacePath,
+            BackendKind: "opencode",
+            BranchName: "poc-chat-through-harness",
             FailureSummary: null,
             Diagnostics: null);
     }

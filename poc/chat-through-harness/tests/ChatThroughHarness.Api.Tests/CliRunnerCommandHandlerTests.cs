@@ -138,6 +138,11 @@ public sealed class CliRunnerCommandHandlerTests
         public List<RunnerEventEnvelope> PublishedEvents { get; } = [];
         public List<ClaimCheckContentRef> Uploads { get; } = [];
 
+        public Task UpsertHeartbeatAsync(RunnerHeartbeat heartbeat, CancellationToken cancellationToken)
+        {
+            return Task.CompletedTask;
+        }
+
         public Task<IReadOnlyCollection<RunnerCommandEnvelope>> PollCommandsAsync(CancellationToken cancellationToken)
         {
             return Task.FromResult<IReadOnlyCollection<RunnerCommandEnvelope>>([]);

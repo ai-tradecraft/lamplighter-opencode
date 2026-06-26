@@ -61,6 +61,48 @@ button:disabled {
   margin-bottom: 14px;
 }
 
+.panel-title.secondary {
+  margin-top: 18px;
+}
+
+.controller-list,
+.agent-list {
+  display: grid;
+  gap: 8px;
+}
+
+.list-button {
+  align-items: start;
+  background: #f4f7f7;
+  border: 1px solid #d5dedf;
+  color: #172026;
+  display: grid;
+  font-weight: 700;
+  justify-items: start;
+  min-height: 48px;
+  padding: 8px 10px;
+  text-align: left;
+  width: 100%;
+}
+
+.list-button.selected {
+  background: #dcebea;
+  border-color: #1d4f4a;
+}
+
+.list-button small {
+  color: #607175;
+  font-size: 12px;
+  font-weight: 600;
+  margin-top: 2px;
+}
+
+.empty-list {
+  color: #607175;
+  font-size: 13px;
+  padding: 6px 0;
+}
+
 dl {
   display: grid;
   gap: 8px;

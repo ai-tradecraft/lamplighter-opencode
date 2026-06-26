@@ -8,6 +8,7 @@ namespace ChatThroughHarness.Runner;
 
 public interface IRunnerApiClient
 {
+    Task UpsertHeartbeatAsync(RunnerHeartbeat heartbeat, CancellationToken cancellationToken);
     Task<IReadOnlyCollection<RunnerCommandEnvelope>> PollCommandsAsync(CancellationToken cancellationToken);
     Task<RunnerCommandEnvelope> ClaimCommandAsync(RunnerCommandEnvelope command, CancellationToken cancellationToken);
     Task CompleteCommandAsync(RunnerCommandEnvelope command, RunnerCommandResult result, CancellationToken cancellationToken);
@@ -21,6 +22,16 @@ public interface IRunnerApiClient
 public sealed class RunnerApiClient(HttpClient httpClient, IOptions<RunnerOptions> options) : IRunnerApiClient
 {
     private readonly RunnerOptions _options = options.Value;
+
+    public async Task UpsertHeartbeatAsync(RunnerHeartbeat heartbeat, CancellationToken cancellationToken)
+    {
+        var response = await httpClient.PostAsJsonAsync(
+            "/api/runner/heartbeat",
+            heartbeat,
+            RunnerProtocolJson.Options,
+            cancellationToken);
+        response.EnsureSuccessStatusCode();
+    }
 
     public async Task<IReadOnlyCollection<RunnerCommandEnvelope>> PollCommandsAsync(CancellationToken cancellationToken)
     {

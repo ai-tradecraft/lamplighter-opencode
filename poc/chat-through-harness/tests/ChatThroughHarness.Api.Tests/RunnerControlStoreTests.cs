@@ -137,7 +137,8 @@ public sealed class RunnerControlStoreTests
             RunnerId: "runner_1",
             Status: "online",
             ActiveCommandIds: ["cmd_1"],
-            ObservedAt: DateTimeOffset.UnixEpoch);
+            ObservedAt: DateTimeOffset.UnixEpoch,
+            Agents: []);
         var bytes = "persisted"u8.ToArray();
         var sha = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
 

@@ -1,11 +1,29 @@
 import React, { FormEvent, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { HubConnectionBuilder } from "@microsoft/signalr";
-import { Bot, CircleStop, Play, Send, Terminal } from "lucide-react";
+import { Bot, CircleStop, Cpu, Play, Send, Terminal } from "lucide-react";
 import "./styles.css";
+
+type AgentController = {
+  runnerId: string;
+  status: string;
+  observedAt: string;
+  agents: ControllerAgent[];
+};
+
+type ControllerAgent = {
+  agentSessionId: string;
+  status: string;
+  runtimePath: string;
+  workspacePath: string;
+  opencodeEndpoint?: string;
+  opencodePid?: number;
+  observedAt: string;
+};
 
 type Session = {
   id: string;
+  controllerId?: string;
   status: string;
   runtimePath: string;
   workspacePath: string;
@@ -44,6 +62,8 @@ type Diagnostics = {
 const api = import.meta.env.VITE_API_BASE_URL ?? "";
 
 function App() {
+  const [controllers, setControllers] = useState<AgentController[]>([]);
+  const [selectedControllerId, setSelectedControllerId] = useState<string | null>(null);
   const [session, setSession] = useState<Session | null>(null);
   const [turns, setTurns] = useState<Turn[]>([]);
   const [events, setEvents] = useState<RuntimeEvent[]>([]);
@@ -54,6 +74,15 @@ function App() {
   const latestDiagnostics = useMemo(() => {
     return [...turns].reverse().find((turn) => turn.diagnostics)?.diagnostics ?? session?.diagnostics;
   }, [session, turns]);
+  const selectedController = useMemo(() => {
+    return controllers.find((controller) => controller.runnerId === selectedControllerId) ?? null;
+  }, [controllers, selectedControllerId]);
+
+  useEffect(() => {
+    refreshControllers();
+    const interval = window.setInterval(refreshControllers, 5000);
+    return () => window.clearInterval(interval);
+  }, []);
 
   useEffect(() => {
     if (!session) {
@@ -68,6 +97,7 @@ function App() {
       }
       if (event.type.startsWith("agent_session.")) {
         refreshSession(session.id);
+        refreshControllers();
       }
     };
 
@@ -87,21 +117,52 @@ function App() {
     };
   }, [session?.id]);
 
+  async function refreshControllers() {
+    const response = await fetch(`${api}/api/agent-controllers`);
+    if (!response.ok) {
+      return;
+    }
+    const nextControllers = (await response.json()) as AgentController[];
+    setControllers(nextControllers);
+    setSelectedControllerId((current) => current ?? nextControllers[0]?.runnerId ?? null);
+  }
+
   async function startSession() {
+    if (!selectedControllerId) {
+      setError("No active local controller is available.");
+      return;
+    }
+
     setBusy(true);
     setError(null);
     try {
       const response = await fetch(`${api}/api/agent-sessions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ goal: "Chat through harness POC" })
+        body: JSON.stringify({ goal: "Chat through harness POC", controllerId: selectedControllerId })
       });
       if (!response.ok) {
         throw new Error(await response.text());
       }
       const created = (await response.json()) as Session;
       setSession(created);
+      setTurns([]);
       await refreshEvents(created.id);
+      await refreshControllers();
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function openAgent(agent: ControllerAgent) {
+    setBusy(true);
+    setError(null);
+    try {
+      await refreshSession(agent.agentSessionId);
+      await refreshTurns(agent.agentSessionId);
+      await refreshEvents(agent.agentSessionId);
     } catch (err) {
       setError(String(err));
     } finally {
@@ -157,6 +218,13 @@ function App() {
     }
   }
 
+  async function refreshTurns(sessionId: string) {
+    const response = await fetch(`${api}/api/agent-sessions/${sessionId}/turns`);
+    if (response.ok) {
+      setTurns((await response.json()) as Turn[]);
+    }
+  }
+
   async function refreshTurn(sessionId: string, turnId?: string) {
     if (!turnId) {
       return;
@@ -179,8 +247,52 @@ function App() {
     <main className="shell">
       <aside className="panel setup">
         <div className="panel-title">
+          <Cpu size={18} />
+          Controllers
+        </div>
+        <div className="controller-list">
+          {controllers.length === 0 ? <div className="empty-list">No controllers online.</div> : null}
+          {controllers.map((controller) => (
+            <button
+              className={`list-button ${controller.runnerId === selectedControllerId ? "selected" : ""}`}
+              key={controller.runnerId}
+              onClick={() => setSelectedControllerId(controller.runnerId)}
+            >
+              <span>{controller.runnerId}</span>
+              <small>{controller.status} · {controller.agents.length}</small>
+            </button>
+          ))}
+        </div>
+
+        <div className="panel-title secondary">
           <Bot size={18} />
-          Agent Setup
+          Agents
+        </div>
+        <div className="agent-list">
+          {!selectedController ? <div className="empty-list">Select a controller.</div> : null}
+          {selectedController?.agents.length === 0 ? <div className="empty-list">No agents allocated.</div> : null}
+          {selectedController?.agents.map((agent) => (
+            <button
+              className={`list-button ${agent.agentSessionId === session?.id ? "selected" : ""}`}
+              key={agent.agentSessionId}
+              onClick={() => openAgent(agent)}
+            >
+              <span>{agent.agentSessionId}</span>
+              <small>{agent.status}</small>
+            </button>
+          ))}
+        </div>
+
+        <div className="button-row">
+          <button onClick={startSession} disabled={busy || !selectedControllerId}>
+            <Play size={16} />
+            New Agent
+          </button>
+        </div>
+
+        <div className="panel-title secondary">
+          <Bot size={18} />
+          Selected
         </div>
         <dl>
           <dt>Status</dt>
@@ -193,10 +305,6 @@ function App() {
           <dd>{session?.workspacePath ?? "-"}</dd>
         </dl>
         <div className="button-row">
-          <button onClick={startSession} disabled={busy || session?.status === "ready"}>
-            <Play size={16} />
-            Start
-          </button>
           <button onClick={cancelSession} disabled={!session || session.status === "cancelled"}>
             <CircleStop size={16} />
             Cancel

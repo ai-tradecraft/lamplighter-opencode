@@ -77,6 +77,16 @@ public sealed record RunnerHeartbeat(
     [property: JsonPropertyName("runner_id")] string RunnerId,
     [property: JsonPropertyName("status")] string Status,
     [property: JsonPropertyName("active_command_ids")] IReadOnlyList<string> ActiveCommandIds,
+    [property: JsonPropertyName("observed_at")] DateTimeOffset ObservedAt,
+    [property: JsonPropertyName("agents")] IReadOnlyList<RunnerAgentInventoryItem> Agents);
+
+public sealed record RunnerAgentInventoryItem(
+    [property: JsonPropertyName("agent_session_id")] string AgentSessionId,
+    [property: JsonPropertyName("status")] string Status,
+    [property: JsonPropertyName("runtime_path")] string RuntimePath,
+    [property: JsonPropertyName("workspace_path")] string WorkspacePath,
+    [property: JsonPropertyName("opencode_endpoint")] string? OpenCodeEndpoint,
+    [property: JsonPropertyName("opencode_pid")] int? OpenCodePid,
     [property: JsonPropertyName("observed_at")] DateTimeOffset ObservedAt);
 
 public sealed record RunnerCommandEnvelope(

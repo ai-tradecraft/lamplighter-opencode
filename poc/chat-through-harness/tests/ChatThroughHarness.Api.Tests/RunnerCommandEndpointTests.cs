@@ -42,6 +42,68 @@ public sealed class RunnerCommandEndpointTests : IClassFixture<WebApplicationFac
     }
 
     [Fact]
+    public async Task CreateSessionForControllerQueuesCommandForThatRunner()
+    {
+        using var client = _factory.CreateClient();
+
+        var response = await client.PostAsJsonAsync(
+            "/api/agent-sessions",
+            new CreateAgentSessionRequest(ControllerId: "runner_local"));
+        response.EnsureSuccessStatusCode();
+        var session = await response.Content.ReadFromJsonAsync<AgentSessionRecord>(JsonDefaults.Options);
+        Assert.NotNull(session);
+        Assert.Equal("runner_local", session.ControllerId);
+
+        var otherRunnerCommands = await PollCommandsAsync(client, "runner_other");
+        Assert.DoesNotContain(otherRunnerCommands, command => command.AgentSessionId == session.Id);
+
+        var commands = await PollCommandsAsync(client, "runner_local");
+        var command = Assert.Single(commands, command => command.AgentSessionId == session.Id);
+        Assert.Equal("runner_local", command.RunnerId);
+    }
+
+    [Fact]
+    public async Task RunnerHeartbeatRegistersControllerAndAgentInventory()
+    {
+        using var client = _factory.CreateClient();
+        var observedAt = DateTimeOffset.UtcNow;
+        var heartbeat = new RunnerHeartbeat(
+            RunnerId: "runner_local",
+            Status: "online",
+            ActiveCommandIds: [],
+            ObservedAt: observedAt,
+            Agents:
+            [
+                new RunnerAgentInventoryItem(
+                    AgentSessionId: "session_local",
+                    Status: "ready",
+                    RuntimePath: "/tmp/session_local",
+                    WorkspacePath: "/tmp/session_local/workspace",
+                    OpenCodeEndpoint: "http://127.0.0.1:4097",
+                    OpenCodePid: 123,
+                    ObservedAt: observedAt)
+            ]);
+
+        var response = await client.PostAsJsonAsync("/api/runner/heartbeat", heartbeat, RunnerProtocolJson.Options);
+        response.EnsureSuccessStatusCode();
+
+        var controllers = await client.GetFromJsonAsync<IReadOnlyCollection<AgentControllerRecord>>(
+            "/api/agent-controllers",
+            JsonDefaults.Options);
+        Assert.NotNull(controllers);
+        var controller = Assert.Single(controllers, item => item.RunnerId == "runner_local");
+        Assert.Equal("online", controller.Status);
+        Assert.Single(controller.Agents);
+
+        var session = await client.GetFromJsonAsync<AgentSessionRecord>(
+            "/api/agent-sessions/session_local",
+            JsonDefaults.Options);
+        Assert.NotNull(session);
+        Assert.Equal("ready", session.Status);
+        Assert.Equal("runner_local", session.ControllerId);
+    }
+
+    [Fact]
     public async Task SubmitTurnQueuesTurnCommandWithoutHarnessResponse()
     {
         using var client = _factory.CreateClient();
@@ -70,6 +132,12 @@ public sealed class RunnerCommandEndpointTests : IClassFixture<WebApplicationFac
         var payload = await ReadContentAsync(client, command.PayloadRef!);
         Assert.Contains("\"instruction\"", payload);
         Assert.Contains("hello runner", payload);
+
+        var turns = await client.GetFromJsonAsync<IReadOnlyCollection<AgentTurnRecord>>(
+            $"/api/agent-sessions/{session.Id}/turns",
+            JsonDefaults.Options);
+        Assert.NotNull(turns);
+        Assert.Contains(turns, item => item.Id == turn.Id);
     }
 
     [Fact]
@@ -160,10 +228,12 @@ public sealed class RunnerCommandEndpointTests : IClassFixture<WebApplicationFac
         Assert.Equal(turn.Id, completedEvent.TurnId);
     }
 
-    private static async Task<IReadOnlyCollection<RunnerCommandEnvelope>> PollCommandsAsync(HttpClient client)
+    private static async Task<IReadOnlyCollection<RunnerCommandEnvelope>> PollCommandsAsync(
+        HttpClient client,
+        string runnerId = "runner_test")
     {
         var commands = await client.GetFromJsonAsync<IReadOnlyCollection<RunnerCommandEnvelope>>(
-            "/api/runner/commands?runnerId=runner_test&wait=0",
+            $"/api/runner/commands?runnerId={runnerId}&wait=0",
             RunnerProtocolJson.Options);
         return commands ?? [];
     }
