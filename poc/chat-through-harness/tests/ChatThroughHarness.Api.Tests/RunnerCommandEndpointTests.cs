@@ -87,13 +87,19 @@ public sealed class RunnerCommandEndpointTests : IClassFixture<WebApplicationFac
         var response = await client.PostAsJsonAsync("/api/runner/heartbeat", heartbeat, RunnerProtocolJson.Options);
         response.EnsureSuccessStatusCode();
 
-        var controllers = await client.GetFromJsonAsync<IReadOnlyCollection<AgentControllerRecord>>(
-            "/api/agent-controllers",
+        var controllersResponse = await client.GetAsync("/api/agent-controllers");
+        controllersResponse.EnsureSuccessStatusCode();
+        var controllersJson = await controllersResponse.Content.ReadAsStringAsync();
+        Assert.Contains("\"agentSessionId\"", controllersJson);
+        Assert.DoesNotContain("\"agent_session_id\"", controllersJson);
+        var controllers = JsonSerializer.Deserialize<IReadOnlyCollection<AgentControllerRecord>>(
+            controllersJson,
             JsonDefaults.Options);
         Assert.NotNull(controllers);
         var controller = Assert.Single(controllers, item => item.RunnerId == "runner_local");
         Assert.Equal("online", controller.Status);
-        Assert.Single(controller.Agents);
+        var agent = Assert.Single(controller.Agents);
+        Assert.Equal("session_local", agent.AgentSessionId);
 
         var session = await client.GetFromJsonAsync<AgentSessionRecord>(
             "/api/agent-sessions/session_local",

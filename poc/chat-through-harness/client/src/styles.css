@@ -37,6 +37,7 @@ button:disabled {
   grid-template-columns: 300px minmax(360px, 1fr) 300px;
   grid-template-rows: minmax(0, 1fr) 180px;
   height: 100vh;
+  overflow: hidden;
   padding: 16px;
 }
 
@@ -53,6 +54,14 @@ button:disabled {
   padding: 16px;
 }
 
+.setup {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
 .panel-title {
   align-items: center;
   display: flex;
@@ -67,8 +76,20 @@ button:disabled {
 
 .controller-list,
 .agent-list {
+  align-content: start;
   display: grid;
   gap: 8px;
+  overflow-y: auto;
+}
+
+.controller-list {
+  flex: 0 1 auto;
+  max-height: 144px;
+}
+
+.agent-list {
+  flex: 1 1 180px;
+  min-height: 96px;
 }
 
 .list-button {
@@ -95,6 +116,13 @@ button:disabled {
   font-size: 12px;
   font-weight: 600;
   margin-top: 2px;
+}
+
+.list-button span {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .empty-list {
@@ -240,6 +268,20 @@ dd[data-status="ready"] {
     grid-template-rows: auto minmax(420px, 1fr) auto 180px;
     height: auto;
     min-height: 100vh;
+    overflow: visible;
+  }
+
+  .setup {
+    overflow: visible;
+  }
+
+  .controller-list {
+    max-height: 192px;
+  }
+
+  .agent-list {
+    flex: none;
+    max-height: 320px;
   }
 
   .diagnostics {

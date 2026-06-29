@@ -1108,7 +1108,7 @@ public sealed record AgentControllerRecord(
     string RunnerId,
     string Status,
     DateTimeOffset ObservedAt,
-    IReadOnlyList<RunnerAgentInventoryItem> Agents)
+    IReadOnlyList<AgentControllerAgentRecord> Agents)
 {
     public static AgentControllerRecord FromHeartbeat(RunnerHeartbeat heartbeat)
     {
@@ -1116,7 +1116,29 @@ public sealed record AgentControllerRecord(
             RunnerId: heartbeat.RunnerId,
             Status: heartbeat.Status,
             ObservedAt: heartbeat.ObservedAt,
-            Agents: heartbeat.Agents);
+            Agents: heartbeat.Agents.Select(AgentControllerAgentRecord.FromInventory).ToArray());
+    }
+}
+
+public sealed record AgentControllerAgentRecord(
+    string AgentSessionId,
+    string Status,
+    string RuntimePath,
+    string WorkspacePath,
+    string? OpenCodeEndpoint,
+    int? OpenCodePid,
+    DateTimeOffset ObservedAt)
+{
+    public static AgentControllerAgentRecord FromInventory(RunnerAgentInventoryItem agent)
+    {
+        return new AgentControllerAgentRecord(
+            AgentSessionId: agent.AgentSessionId,
+            Status: agent.Status,
+            RuntimePath: agent.RuntimePath,
+            WorkspacePath: agent.WorkspacePath,
+            OpenCodeEndpoint: agent.OpenCodeEndpoint,
+            OpenCodePid: agent.OpenCodePid,
+            ObservedAt: agent.ObservedAt);
     }
 }
 

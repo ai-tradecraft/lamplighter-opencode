@@ -277,7 +277,7 @@ function App() {
               key={agent.agentSessionId}
               onClick={() => openAgent(agent)}
             >
-              <span>{agent.agentSessionId}</span>
+              <span title={agent.agentSessionId}>{agent.agentSessionId}</span>
               <small>{agent.status}</small>
             </button>
           ))}
@@ -290,26 +290,30 @@ function App() {
           </button>
         </div>
 
-        <div className="panel-title secondary">
-          <Bot size={18} />
-          Selected
-        </div>
-        <dl>
-          <dt>Status</dt>
-          <dd data-status={session?.status ?? "idle"}>{session?.status ?? "idle"}</dd>
-          <dt>Backend</dt>
-          <dd>{session?.backendKind ?? "opencode"}</dd>
-          <dt>Branch</dt>
-          <dd>{session?.branchName ?? "poc-chat-through-harness"}</dd>
-          <dt>Workspace</dt>
-          <dd>{session?.workspacePath ?? "-"}</dd>
-        </dl>
-        <div className="button-row">
-          <button onClick={cancelSession} disabled={!session || session.status === "cancelled"}>
-            <CircleStop size={16} />
-            Cancel
-          </button>
-        </div>
+        {session ? (
+          <>
+            <div className="panel-title secondary">
+              <Bot size={18} />
+              Selected
+            </div>
+            <dl>
+              <dt>Status</dt>
+              <dd data-status={session.status}>{session.status}</dd>
+              <dt>Backend</dt>
+              <dd>{session.backendKind}</dd>
+              <dt>Branch</dt>
+              <dd>{session.branchName}</dd>
+              <dt>Workspace</dt>
+              <dd>{session.workspacePath}</dd>
+            </dl>
+            <div className="button-row">
+              <button onClick={cancelSession} disabled={session.status === "cancelled"}>
+                <CircleStop size={16} />
+                Cancel
+              </button>
+            </div>
+          </>
+        ) : null}
       </aside>
 
       <section className="chat">
