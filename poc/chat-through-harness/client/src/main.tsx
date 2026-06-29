@@ -62,6 +62,64 @@ type Diagnostics = {
 
 const api = import.meta.env.VITE_API_BASE_URL ?? "";
 
+type ClientLogLevel = "debug" | "information" | "warning" | "error";
+type ClientLogContext = Record<string, string | number | boolean | null | undefined>;
+
+function reportClientLog(level: ClientLogLevel, message: string, context?: ClientLogContext) {
+  const normalizedContext = context
+    ? Object.fromEntries(Object.entries(context).map(([key, value]) => [key, value == null ? null : String(value)]))
+    : undefined;
+  void fetch(`${api}/api/client-logs`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      level,
+      message,
+      timestamp: new Date().toISOString(),
+      context: normalizedContext
+    })
+  }).catch(() => undefined);
+}
+
+async function apiFetch(path: string, init?: RequestInit) {
+  const method = init?.method ?? "GET";
+  try {
+    const response = await fetch(`${api}${path}`, init);
+    if (!response.ok) {
+      reportClientLog("warning", "API request returned a non-success response.", {
+        method,
+        path,
+        status: response.status
+      });
+    }
+    return response;
+  } catch (error) {
+    reportClientLog("error", "API request failed.", {
+      method,
+      path,
+      error: String(error)
+    });
+    throw error;
+  }
+}
+
+window.addEventListener("error", (event) => {
+  reportClientLog("error", "Unhandled browser error.", {
+    message: event.message,
+    source: event.filename,
+    line: event.lineno,
+    column: event.colno
+  });
+});
+window.addEventListener("unhandledrejection", (event) => {
+  reportClientLog("error", "Unhandled browser promise rejection.", {
+    reason: String(event.reason)
+  });
+});
+reportClientLog("information", "Portal client initialized.", {
+  path: window.location.pathname
+});
+
 function App() {
   const [controllers, setControllers] = useState<AgentController[]>([]);
   const [selectedControllerId, setSelectedControllerId] = useState<string | null>(null);
@@ -129,14 +187,28 @@ function App() {
       "agent_turn.failed"
     ].forEach((name) => connection.on(name, handleEvent));
 
-    connection.start().then(() => connection.invoke("JoinSession", session.id)).catch((err) => setError(String(err)));
+    connection
+      .start()
+      .then(() => connection.invoke("JoinSession", session.id))
+      .catch((err) => {
+        reportClientLog("error", "SignalR session connection failed.", {
+          sessionId: session.id,
+          error: String(err)
+        });
+        setError(String(err));
+      });
     return () => {
       connection.stop().catch(() => undefined);
     };
   }, [session?.id]);
 
   async function refreshControllers() {
-    const response = await fetch(`${api}/api/agent-controllers`);
+    let response: Response;
+    try {
+      response = await apiFetch("/api/agent-controllers");
+    } catch {
+      return;
+    }
     if (!response.ok) {
       return;
     }
@@ -158,7 +230,7 @@ function App() {
     setBusy(true);
     setError(null);
     try {
-      const response = await fetch(`${api}/api/agent-sessions`, {
+      const response = await apiFetch("/api/agent-sessions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ goal: "Chat through harness POC", controllerId: selectedControllerId })
@@ -167,6 +239,10 @@ function App() {
         throw new Error(await response.text());
       }
       const created = (await response.json()) as Session;
+      reportClientLog("information", "Agent session creation accepted.", {
+        sessionId: created.id,
+        controllerId: selectedControllerId
+      });
       setSession(created);
       setTurns([]);
       await refreshEvents(created.id);
@@ -185,6 +261,9 @@ function App() {
       await refreshSession(agent.agentSessionId);
       await refreshTurns(agent.agentSessionId);
       await refreshEvents(agent.agentSessionId);
+      reportClientLog("information", "Agent session opened.", {
+        sessionId: agent.agentSessionId
+      });
     } catch (err) {
       setError(String(err));
     } finally {
@@ -203,7 +282,7 @@ function App() {
     setBusy(true);
     setError(null);
     try {
-      const response = await fetch(`${api}/api/agent-sessions/${session.id}/turns`, {
+      const response = await apiFetch(`/api/agent-sessions/${session.id}/turns`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ prompt: currentPrompt })
@@ -212,6 +291,10 @@ function App() {
         throw new Error(await response.text());
       }
       const turn = (await response.json()) as Turn;
+      reportClientLog("information", "Agent turn submitted.", {
+        sessionId: session.id,
+        turnId: turn.id
+      });
       setTurns((current) => [...current.filter((item) => item.id !== turn.id), turn]);
       await refreshEvents(session.id);
     } catch (err) {
@@ -225,7 +308,7 @@ function App() {
     if (!session) {
       return;
     }
-    await fetch(`${api}/api/agent-sessions/${session.id}/cancel`, {
+    await apiFetch(`/api/agent-sessions/${session.id}/cancel`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ reason: "Cancelled from UI." })
@@ -234,7 +317,7 @@ function App() {
   }
 
   async function refreshSession(sessionId: string) {
-    const response = await fetch(`${api}/api/agent-sessions/${sessionId}`);
+    const response = await apiFetch(`/api/agent-sessions/${sessionId}`);
     if (!response.ok) {
       throw new Error(`Agent session ${sessionId} is no longer available.`);
     }
@@ -242,7 +325,7 @@ function App() {
   }
 
   async function refreshTurns(sessionId: string) {
-    const response = await fetch(`${api}/api/agent-sessions/${sessionId}/turns`);
+    const response = await apiFetch(`/api/agent-sessions/${sessionId}/turns`);
     if (response.ok) {
       setTurns((await response.json()) as Turn[]);
     }
@@ -252,7 +335,7 @@ function App() {
     if (!turnId) {
       return;
     }
-    const response = await fetch(`${api}/api/agent-sessions/${sessionId}/turns/${turnId}`);
+    const response = await apiFetch(`/api/agent-sessions/${sessionId}/turns/${turnId}`);
     if (response.ok) {
       const turn = (await response.json()) as Turn;
       setTurns((current) => [...current.filter((item) => item.id !== turn.id), turn]);
@@ -260,7 +343,7 @@ function App() {
   }
 
   async function refreshEvents(sessionId: string) {
-    const response = await fetch(`${api}/api/agent-sessions/${sessionId}/events`);
+    const response = await apiFetch(`/api/agent-sessions/${sessionId}/events`);
     if (response.ok) {
       setEvents((await response.json()) as RuntimeEvent[]);
     }

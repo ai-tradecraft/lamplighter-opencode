@@ -270,7 +270,9 @@ public interface IHarnessProcessRunner
     Task<ProcessOutput> RunAsync(string fileName, string[] arguments, CancellationToken cancellationToken);
 }
 
-public sealed class HarnessProcessRunner(IOptions<RunnerOptions> options) : IHarnessProcessRunner
+public sealed class HarnessProcessRunner(
+    IOptions<RunnerOptions> options,
+    ILogger<HarnessProcessRunner> logger) : IHarnessProcessRunner
 {
     private readonly RunnerOptions _options = options.Value;
 
@@ -280,6 +282,8 @@ public sealed class HarnessProcessRunner(IOptions<RunnerOptions> options) : IHar
         CancellationToken cancellationToken)
     {
         var command = string.Join(" ", new[] { fileName }.Concat(arguments.Select(Quote)));
+        var startedAt = Stopwatch.GetTimestamp();
+        logger.LogInformation("Starting harness process: {Command}", command);
         var startInfo = new ProcessStartInfo(fileName)
         {
             WorkingDirectory = LocateHarnessRepo(),
@@ -296,7 +300,24 @@ public sealed class HarnessProcessRunner(IOptions<RunnerOptions> options) : IHar
         var stdoutTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
         var stderrTask = process.StandardError.ReadToEndAsync(cancellationToken);
         await process.WaitForExitAsync(cancellationToken);
-        return new ProcessOutput(command, process.ExitCode, await stdoutTask, await stderrTask);
+        var output = new ProcessOutput(command, process.ExitCode, await stdoutTask, await stderrTask);
+        var elapsed = Stopwatch.GetElapsedTime(startedAt);
+        if (output.ExitCode == 0)
+        {
+            logger.LogInformation(
+                "Harness process completed with exit code 0 in {ElapsedMilliseconds} ms.",
+                elapsed.TotalMilliseconds);
+        }
+        else
+        {
+            logger.LogWarning(
+                "Harness process failed with exit code {ExitCode} in {ElapsedMilliseconds} ms; stderr length {StderrLength}.",
+                output.ExitCode,
+                elapsed.TotalMilliseconds,
+                output.Stderr.Length);
+        }
+
+        return output;
     }
 
     private string LocateHarnessRepo()

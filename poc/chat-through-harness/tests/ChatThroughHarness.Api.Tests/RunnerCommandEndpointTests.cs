@@ -18,6 +18,29 @@ public sealed class RunnerCommandEndpointTests : IClassFixture<WebApplicationFac
     }
 
     [Fact]
+    public async Task BrowserLogsAreWrittenToCentralJsonLinesFile()
+    {
+        using var client = _factory.CreateClient();
+        var marker = Ids.New("browser_log");
+        var response = await client.PostAsJsonAsync(
+            "/api/client-logs",
+            new ClientLogRequest(
+                Level: "error",
+                Message: marker,
+                Timestamp: DateTimeOffset.UtcNow,
+                Context: new Dictionary<string, string?> { ["sessionId"] = "session_1" }));
+
+        Assert.Equal(System.Net.HttpStatusCode.Accepted, response.StatusCode);
+        var logPath = Path.Combine(RuntimePaths.LogRoot, "browser.jsonl");
+        var contents = await File.ReadAllTextAsync(logPath);
+        Assert.Contains(marker, contents);
+        Assert.Contains("\"source\":\"browser\"", contents);
+        Assert.Contains(
+            File.ReadLines(logPath),
+            line => line.Contains(marker, StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task CreateSessionQueuesPrepareCommand()
     {
         using var client = _factory.CreateClient();

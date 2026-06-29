@@ -26,6 +26,7 @@ builder.Services.AddSignalR();
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<AgentSessionStore>();
 builder.Services.AddSingleton<RunnerControlStore>();
+builder.Services.AddSingleton<CentralLogStore>();
 builder.Services.AddSingleton<HarnessClientFactory>();
 builder.Services.AddSingleton<IHarnessClient>(sp => sp.GetRequiredService<HarnessClientFactory>().Create());
 
@@ -33,6 +34,20 @@ var app = builder.Build();
 
 app.UseCors();
 app.MapHub<AgentSessionHub>("/hubs/agent-sessions");
+
+app.MapPost("/api/client-logs", async (
+    ClientLogRequest request,
+    CentralLogStore logStore,
+    CancellationToken cancellationToken) =>
+{
+    if (string.IsNullOrWhiteSpace(request.Message))
+    {
+        return Results.BadRequest(new { message = "Log message is required." });
+    }
+
+    await logStore.WriteBrowserLogAsync(request, cancellationToken);
+    return Results.Accepted();
+});
 
 app.MapGet("/api/runner/commands", async (
     string runnerId,
@@ -1081,6 +1096,50 @@ public sealed class RunnerControlStore
     };
 }
 
+public sealed class CentralLogStore
+{
+    private readonly SemaphoreSlim _writeLock = new(1, 1);
+    private static readonly JsonSerializerOptions LogJsonOptions = new(JsonSerializerDefaults.Web);
+
+    public async Task WriteBrowserLogAsync(
+        ClientLogRequest request,
+        CancellationToken cancellationToken)
+    {
+        var entry = new
+        {
+            timestamp = request.Timestamp ?? DateTimeOffset.UtcNow,
+            source = "browser",
+            level = Truncate(request.Level ?? "information", 32),
+            message = Truncate(request.Message, 2000),
+            context = request.Context?
+                .Take(32)
+                .ToDictionary(
+                    item => Truncate(item.Key, 100),
+                    item => item.Value is null ? null : Truncate(item.Value, 1000))
+        };
+        var path = Path.Combine(RuntimePaths.LogRoot, "browser.jsonl");
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+
+        await _writeLock.WaitAsync(cancellationToken);
+        try
+        {
+            await File.AppendAllTextAsync(
+                path,
+                JsonSerializer.Serialize(entry, LogJsonOptions) + Environment.NewLine,
+                cancellationToken);
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
+    }
+
+    private static string Truncate(string value, int maxLength)
+    {
+        return value.Length <= maxLength ? value : value[..maxLength];
+    }
+}
+
 public enum RunnerCommandMutationStatus
 {
     Ok,
@@ -1112,6 +1171,17 @@ public static class RuntimePaths
             var configured = Environment.GetEnvironmentVariable("CHAT_THROUGH_HARNESS_RUNTIME_ROOT");
             return string.IsNullOrWhiteSpace(configured)
                 ? Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../.agent-runtime"))
+                : Path.GetFullPath(configured);
+        }
+    }
+
+    public static string LogRoot
+    {
+        get
+        {
+            var configured = Environment.GetEnvironmentVariable("CHAT_THROUGH_HARNESS_LOG_ROOT");
+            return string.IsNullOrWhiteSpace(configured)
+                ? Path.Combine(Root, "logs")
                 : Path.GetFullPath(configured);
         }
     }
@@ -1158,6 +1228,11 @@ public static class RunnerCommandFactory
 public sealed record CreateAgentSessionRequest(string? Goal = null, string? BranchName = null, string? ControllerId = null);
 public sealed record SubmitTurnRequest(string Prompt);
 public sealed record CancelSessionRequest(string? Reason);
+public sealed record ClientLogRequest(
+    string? Level,
+    string Message,
+    DateTimeOffset? Timestamp,
+    IReadOnlyDictionary<string, string?>? Context);
 
 public sealed record AgentControllerRecord(
     string RunnerId,

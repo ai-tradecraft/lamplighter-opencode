@@ -313,9 +313,14 @@ def start_opencode_server(
     """Start a supervised opencode serve process and persist endpoint metadata."""
     root = root.resolve()
     workspace = root / "workspace"
-    logs = root / "logs"
+    configured_log_root = os.environ.get("CHAT_THROUGH_HARNESS_LOG_ROOT")
+    logs = (
+        Path(configured_log_root).expanduser().resolve() if configured_log_root else root.parent.parent / "logs"
+    ) / "opencode"
     workspace.mkdir(parents=True, exist_ok=True)
     logs.mkdir(parents=True, exist_ok=True)
+    stdout_log = logs / f"{root.name}.stdout.log"
+    stderr_log = logs / f"{root.name}.stderr.log"
 
     mode = opencode_config_mode()
     if mode != "inherit-global":
@@ -338,8 +343,8 @@ def start_opencode_server(
         "config_mode": mode,
         "command": _observed_command(command),
         "workspace": str(workspace),
-        "stdout_log": str(logs / "opencode-serve.stdout.log"),
-        "stderr_log": str(logs / "opencode-serve.stderr.log"),
+        "stdout_log": str(stdout_log),
+        "stderr_log": str(stderr_log),
         "started_at": datetime.now(UTC).isoformat(),
     }
 
@@ -347,8 +352,8 @@ def start_opencode_server(
         _write_json(root / "opencode-server.json", metadata)
         return metadata
 
-    stdout_file = (logs / "opencode-serve.stdout.log").open("a", encoding="utf-8")
-    stderr_file = (logs / "opencode-serve.stderr.log").open("a", encoding="utf-8")
+    stdout_file = stdout_log.open("a", encoding="utf-8")
+    stderr_file = stderr_log.open("a", encoding="utf-8")
     env = opencode_environment(root, mode)
     env["OPENCODE_SERVER_USERNAME"] = "opencode"
     env["OPENCODE_SERVER_PASSWORD"] = password

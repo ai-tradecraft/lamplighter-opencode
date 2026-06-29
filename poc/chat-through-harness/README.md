@@ -99,6 +99,33 @@ RUN_REAL_BACKEND=1 make test-chat-through-harness
 
 Runtime files are written under `poc/chat-through-harness/.agent-runtime/`.
 
+## Central Logs
+
+`make run-chat-through-harness` writes component logs under
+`poc/chat-through-harness/.agent-runtime/logs/`:
+
+- `api.log`: ASP.NET lifecycle, requests, and failures.
+- `runner.log`: controller heartbeats, command processing, and harness process
+  lifecycle.
+- `ui.log`: Vite development-server output.
+- `browser.jsonl`: sanitized browser, API-request, SignalR, and UI lifecycle
+  diagnostics posted by the React client.
+- `opencode/<session-id>.stdout.log` and `.stderr.log`: per-agent
+  `opencode serve` output.
+
+Application-generated lifecycle entries do not intentionally include prompt
+bodies, model responses, credentials, or environment-variable values.
+OpenCode and third-party plugin output can contain additional backend details,
+so treat the log directory as sensitive local diagnostic data. Override the
+directory with `CHAT_THROUGH_HARNESS_LOG_ROOT`.
+
+Watch all top-level component logs:
+
+```sh
+tail -F poc/chat-through-harness/.agent-runtime/logs/{api,runner,ui}.log \
+  poc/chat-through-harness/.agent-runtime/logs/browser.jsonl
+```
+
 ## Real Backend Configuration
 
 The real backend test uses OpenCode through the Lamplighter harness:

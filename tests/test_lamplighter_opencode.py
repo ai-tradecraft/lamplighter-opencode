@@ -147,8 +147,9 @@ def test_submit_turn_command_returns_fake_result(tmp_path) -> None:
     assert "Fake OpenCode response" in result.stdout
 
 
-def test_start_session_command_writes_opencode_server_metadata(tmp_path) -> None:
+def test_start_session_command_writes_opencode_server_metadata(tmp_path, monkeypatch) -> None:
     """start-session dry-run writes endpoint metadata without launching OpenCode."""
+    monkeypatch.delenv("CHAT_THROUGH_HARNESS_LOG_ROOT", raising=False)
     session_root = tmp_path / ".agent-runtime" / "sessions" / "session_1"
     (session_root / "workspace").mkdir(parents=True)
 
@@ -175,6 +176,8 @@ def test_start_session_command_writes_opencode_server_metadata(tmp_path) -> None
     assert payload["endpoint"] == "http://127.0.0.1:4097"
     assert payload["auth"]["username"] == "opencode"
     assert payload["auth"]["password"]
+    assert payload["stdout_log"] == str(tmp_path / ".agent-runtime" / "logs" / "opencode" / "session_1.stdout.log")
+    assert payload["stderr_log"] == str(tmp_path / ".agent-runtime" / "logs" / "opencode" / "session_1.stderr.log")
     assert (session_root / "opencode-server.json").exists()
 
 

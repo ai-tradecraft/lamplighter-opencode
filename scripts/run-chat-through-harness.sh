@@ -9,6 +9,31 @@ API_URL="${CHAT_THROUGH_HARNESS_API_URL:-http://127.0.0.1:5087}"
 PORTAL_URL="${CHAT_THROUGH_HARNESS_URL:-http://127.0.0.1:5173}"
 WINDOW_NAME="${CHAT_THROUGH_HARNESS_TMUX_WINDOW:-chat-poc}"
 
+central_log_root() {
+  printf '%s\n' "${CHAT_THROUGH_HARNESS_LOG_ROOT:-$POC/.agent-runtime/logs}"
+}
+
+run_logged() {
+  local component="$1"
+  shift
+  local log_root log_file exit_code
+  log_root="$(central_log_root)"
+  log_file="$log_root/$component.log"
+  mkdir -p "$log_root"
+  export CHAT_THROUGH_HARNESS_LOG_ROOT="$log_root"
+
+  printf '\n[%s] Starting %s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$component" \
+    | tee -a "$log_file"
+  set +e
+  "$@" 2>&1 | tee -a "$log_file"
+  exit_code="${PIPESTATUS[0]}"
+  set -e
+  printf '[%s] %s exited with status %s\n' \
+    "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$component" "$exit_code" \
+    | tee -a "$log_file"
+  return "$exit_code"
+}
+
 source_env() {
   local env_file="$1"
   if [[ -f "$env_file" ]]; then
@@ -43,7 +68,7 @@ run_api() {
   source_env "$POC/src/ChatThroughHarness.Api/.env"
   export ASPNETCORE_URLS="${ASPNETCORE_URLS:-http://127.0.0.1:5087}"
   cd "$POC"
-  exec dotnet run --project src/ChatThroughHarness.Api
+  run_logged api dotnet run --project src/ChatThroughHarness.Api
 }
 
 run_runner() {
@@ -57,7 +82,7 @@ run_runner() {
     "Tradecraft API" \
     "${Runner__OrchestratorBaseUri%/}/api/agent-controllers"
   cd "$POC"
-  exec dotnet run --project src/ChatThroughHarness.Runner
+  run_logged runner dotnet run --project src/ChatThroughHarness.Runner
 }
 
 run_ui() {
@@ -66,7 +91,7 @@ run_ui() {
   if [[ ! -d node_modules ]]; then
     npm install
   fi
-  exec npm run dev -- --strictPort
+  run_logged ui npm run dev -- --strictPort
 }
 
 open_portal() {
