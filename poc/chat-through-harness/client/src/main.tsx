@@ -40,6 +40,7 @@ type Turn = {
   status: string;
   response?: string;
   failureSummary?: string;
+  failureDetail?: string;
   diagnostics?: Diagnostics;
 };
 
@@ -72,7 +73,17 @@ function App() {
   const [error, setError] = useState<string | null>(null);
 
   const latestDiagnostics = useMemo(() => {
-    return [...turns].reverse().find((turn) => turn.diagnostics)?.diagnostics ?? session?.diagnostics;
+    const turn = [...turns].reverse().find((item) => item.diagnostics || item.failureDetail);
+    if (turn?.diagnostics) {
+      return turn.diagnostics;
+    }
+    if (turn?.failureDetail) {
+      return {
+        summary: turn.failureSummary ?? "Agent turn failed.",
+        detail: turn.failureDetail
+      };
+    }
+    return session?.diagnostics;
   }, [session, turns]);
   const selectedController = useMemo(() => {
     return controllers.find((controller) => controller.runnerId === selectedControllerId) ?? null;

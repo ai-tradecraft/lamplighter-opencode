@@ -12,6 +12,7 @@ builder.Services.AddHttpClient<RunnerApiClient>((sp, client) =>
     client.BaseAddress = options.OrchestratorBaseUri;
 });
 builder.Services.AddTransient<IRunnerApiClient>(sp => sp.GetRequiredService<RunnerApiClient>());
+builder.Services.AddHttpClient<IOpenCodeHealthProbe, OpenCodeHealthProbe>();
 builder.Services.AddSingleton<IHarnessProcessRunner, HarnessProcessRunner>();
 builder.Services.AddSingleton<IRunnerCommandHandler, CliRunnerCommandHandler>();
 builder.Services.AddSingleton<RunnerCommandLoop>();

@@ -379,7 +379,9 @@ static async Task ApplyRunnerEventAsync(
                     Status = result?.Status ?? "completed",
                     CompletedAt = runnerEvent.CreatedAt,
                     Response = result?.Message,
-                    FailureSummary = result?.FailureReport?.Summary
+                    FailureSummary = result?.FailureReport?.Summary,
+                    FailureDetail = result?.FailureReport?.Detail,
+                    Diagnostics = result?.Diagnostics
                 },
                 cancellationToken);
             break;
@@ -390,12 +392,28 @@ static async Task ApplyRunnerEventAsync(
             var turn = await sessionStore.GetTurnAsync(runnerEvent.AgentSessionId, runnerEvent.CorrelationId, cancellationToken);
             if (turn is not null)
             {
+                var result = runnerEvent.PayloadRef?.ContentType.StartsWith(
+                    "application/vnd.tradecraft.agent-turn-result+json",
+                    StringComparison.OrdinalIgnoreCase) == true
+                        ? await PayloadJsonAsync<AgentTurnResult>(
+                            runnerStore,
+                            runnerEvent.PayloadRef,
+                            cancellationToken)
+                        : null;
                 await sessionStore.UpsertTurnAsync(
                     turn with
                     {
                         Status = "failed",
                         CompletedAt = runnerEvent.CreatedAt,
-                        FailureSummary = await PayloadSummaryAsync(runnerStore, runnerEvent.PayloadRef, "Agent turn failed.", cancellationToken)
+                        Response = result?.Message,
+                        FailureSummary = result?.FailureReport?.Summary
+                            ?? await PayloadSummaryAsync(
+                                runnerStore,
+                                runnerEvent.PayloadRef,
+                                "Agent turn failed.",
+                                cancellationToken),
+                        FailureDetail = result?.FailureReport?.Detail,
+                        Diagnostics = result?.Diagnostics
                     },
                     cancellationToken);
             }
@@ -652,11 +670,15 @@ public sealed class AgentSessionStore
     {
         if (_sessions.TryGetValue(agent.AgentSessionId, out var existing))
         {
+            var normalizedStatus = NormalizeAgentStatus(agent.Status);
+            var preserveStatus = IsTerminalSessionStatus(existing.Status);
             var updated = existing with
             {
                 ControllerId = runnerId,
-                Status = NormalizeAgentStatus(agent.Status),
-                ReadyAt = NormalizeAgentStatus(agent.Status) == "ready" ? existing.ReadyAt ?? agent.ObservedAt : existing.ReadyAt,
+                Status = preserveStatus ? existing.Status : normalizedStatus,
+                ReadyAt = !preserveStatus && normalizedStatus == "ready"
+                    ? existing.ReadyAt ?? agent.ObservedAt
+                    : existing.ReadyAt,
                 RuntimePath = agent.RuntimePath,
                 WorkspacePath = agent.WorkspacePath
             };
@@ -721,6 +743,11 @@ public sealed class AgentSessionStore
             "planned" or "starting" => "preparing",
             _ => status
         };
+    }
+
+    private static bool IsTerminalSessionStatus(string status)
+    {
+        return status is "cancelled" or "cancelling" or "failed";
     }
 
     private static async Task WriteJsonAsync<T>(string path, T value, CancellationToken cancellationToken)
@@ -1211,6 +1238,7 @@ public sealed record AgentTurnRecord(
     DateTimeOffset? CompletedAt,
     string? Response,
     string? FailureSummary,
+    string? FailureDetail,
     HarnessDiagnostics? Diagnostics)
 {
     public static AgentTurnRecord Create(string sessionId, string prompt)
@@ -1225,6 +1253,7 @@ public sealed record AgentTurnRecord(
             CompletedAt: null,
             Response: null,
             FailureSummary: null,
+            FailureDetail: null,
             Diagnostics: null);
     }
 }

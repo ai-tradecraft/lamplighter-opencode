@@ -110,6 +110,63 @@ public sealed class RunnerCommandEndpointTests : IClassFixture<WebApplicationFac
     }
 
     [Fact]
+    public async Task RunnerHeartbeatDoesNotOverwriteCancelledSessionStatus()
+    {
+        using var client = _factory.CreateClient();
+        var sessionResponse = await client.PostAsJsonAsync(
+            "/api/agent-sessions",
+            new CreateAgentSessionRequest(ControllerId: "runner_terminal"));
+        sessionResponse.EnsureSuccessStatusCode();
+        var session = await sessionResponse.Content.ReadFromJsonAsync<AgentSessionRecord>(JsonDefaults.Options);
+        Assert.NotNull(session);
+
+        var cancelledEvent = new RunnerEventEnvelope(
+            Id: "event_cancelled",
+            RunnerId: "runner_terminal",
+            AgentSessionId: session.Id,
+            CommandId: "cmd_cancel",
+            Type: "agent_session.cancelled",
+            PayloadRef: null,
+            CausationId: "cmd_cancel",
+            CorrelationId: session.Id,
+            CreatedAt: DateTimeOffset.UtcNow);
+        var eventResponse = await client.PostAsJsonAsync(
+            "/api/runner/events",
+            cancelledEvent,
+            RunnerProtocolJson.Options);
+        eventResponse.EnsureSuccessStatusCode();
+
+        var heartbeat = new RunnerHeartbeat(
+            RunnerId: "runner_terminal",
+            Status: "online",
+            ActiveCommandIds: [],
+            ObservedAt: DateTimeOffset.UtcNow,
+            Agents:
+            [
+                new RunnerAgentInventoryItem(
+                    AgentSessionId: session.Id,
+                    Status: "ready",
+                    RuntimePath: session.RuntimePath,
+                    WorkspacePath: session.WorkspacePath,
+                    OpenCodeEndpoint: "http://127.0.0.1:4097",
+                    OpenCodePid: 123,
+                    ObservedAt: DateTimeOffset.UtcNow)
+            ]);
+        var heartbeatResponse = await client.PostAsJsonAsync(
+            "/api/runner/heartbeat",
+            heartbeat,
+            RunnerProtocolJson.Options);
+        heartbeatResponse.EnsureSuccessStatusCode();
+
+        var refreshed = await client.GetFromJsonAsync<AgentSessionRecord>(
+            $"/api/agent-sessions/{session.Id}",
+            JsonDefaults.Options);
+        Assert.NotNull(refreshed);
+        Assert.Equal("cancelled", refreshed.Status);
+        Assert.NotNull(refreshed.EndedAt);
+    }
+
+    [Fact]
     public async Task SubmitTurnQueuesTurnCommandWithoutHarnessResponse()
     {
         using var client = _factory.CreateClient();
@@ -234,6 +291,104 @@ public sealed class RunnerCommandEndpointTests : IClassFixture<WebApplicationFac
         Assert.Equal(turn.Id, completedEvent.TurnId);
     }
 
+    [Fact]
+    public async Task RunnerTurnFailedEventProjectsStructuredFailureDetails()
+    {
+        using var client = _factory.CreateClient();
+        var sessionResponse = await client.PostAsJsonAsync("/api/agent-sessions", new CreateAgentSessionRequest());
+        sessionResponse.EnsureSuccessStatusCode();
+        var session = await sessionResponse.Content.ReadFromJsonAsync<AgentSessionRecord>(JsonDefaults.Options);
+        Assert.NotNull(session);
+
+        var turnResponse = await client.PostAsJsonAsync(
+            $"/api/agent-sessions/{session.Id}/turns",
+            new SubmitTurnRequest("hello runner"));
+        turnResponse.EnsureSuccessStatusCode();
+        var turn = await turnResponse.Content.ReadFromJsonAsync<AgentTurnRecord>(JsonDefaults.Options);
+        Assert.NotNull(turn);
+
+        var result = new AgentTurnResult(
+            Id: "result_failed",
+            AgentSessionId: session.Id,
+            RequestId: turn.Id,
+            Status: "failed",
+            Message: "OpenCode server request failed.",
+            ArtifactRefs: [],
+            ChangedFiles: [],
+            CommandsObserved: [],
+            FailureReport: new FailureReport(
+                Summary: "OpenCode server request failed.",
+                Detail: "Connection refused"),
+            Diagnostics: null);
+        var payloadRef = await UploadJsonAsync(client, result, "application/vnd.tradecraft.agent-turn-result+json");
+        var runnerEvent = new RunnerEventEnvelope(
+            Id: "event_turn_failed",
+            RunnerId: "runner_test",
+            AgentSessionId: session.Id,
+            CommandId: "cmd_turn",
+            Type: RunnerEventTypes.AgentTurnFailed,
+            PayloadRef: payloadRef,
+            CausationId: "cmd_turn",
+            CorrelationId: turn.Id,
+            CreatedAt: DateTimeOffset.UtcNow);
+
+        var eventResponse = await client.PostAsJsonAsync(
+            "/api/runner/events",
+            runnerEvent,
+            RunnerProtocolJson.Options);
+        eventResponse.EnsureSuccessStatusCode();
+
+        var refreshed = await client.GetFromJsonAsync<AgentTurnRecord>(
+            $"/api/agent-sessions/{session.Id}/turns/{turn.Id}",
+            JsonDefaults.Options);
+        Assert.NotNull(refreshed);
+        Assert.Equal("failed", refreshed.Status);
+        Assert.Equal("OpenCode server request failed.", refreshed.FailureSummary);
+        Assert.Equal("Connection refused", refreshed.FailureDetail);
+    }
+
+    [Fact]
+    public async Task RunnerTurnFailedEventAcceptsPlainTextProcessDiagnostics()
+    {
+        using var client = _factory.CreateClient();
+        var sessionResponse = await client.PostAsJsonAsync("/api/agent-sessions", new CreateAgentSessionRequest());
+        sessionResponse.EnsureSuccessStatusCode();
+        var session = await sessionResponse.Content.ReadFromJsonAsync<AgentSessionRecord>(JsonDefaults.Options);
+        Assert.NotNull(session);
+
+        var turnResponse = await client.PostAsJsonAsync(
+            $"/api/agent-sessions/{session.Id}/turns",
+            new SubmitTurnRequest("hello runner"));
+        turnResponse.EnsureSuccessStatusCode();
+        var turn = await turnResponse.Content.ReadFromJsonAsync<AgentTurnRecord>(JsonDefaults.Options);
+        Assert.NotNull(turn);
+
+        var payloadRef = await UploadTextAsync(client, "exit_code: 2\nstderr: boom", "text/plain");
+        var runnerEvent = new RunnerEventEnvelope(
+            Id: "event_turn_process_failed",
+            RunnerId: "runner_test",
+            AgentSessionId: session.Id,
+            CommandId: "cmd_turn",
+            Type: RunnerEventTypes.AgentTurnFailed,
+            PayloadRef: payloadRef,
+            CausationId: "cmd_turn",
+            CorrelationId: turn.Id,
+            CreatedAt: DateTimeOffset.UtcNow);
+
+        var eventResponse = await client.PostAsJsonAsync(
+            "/api/runner/events",
+            runnerEvent,
+            RunnerProtocolJson.Options);
+        eventResponse.EnsureSuccessStatusCode();
+
+        var refreshed = await client.GetFromJsonAsync<AgentTurnRecord>(
+            $"/api/agent-sessions/{session.Id}/turns/{turn.Id}",
+            JsonDefaults.Options);
+        Assert.NotNull(refreshed);
+        Assert.Equal("failed", refreshed.Status);
+        Assert.Contains("exit_code: 2", refreshed.FailureSummary);
+    }
+
     private static async Task<IReadOnlyCollection<RunnerCommandEnvelope>> PollCommandsAsync(
         HttpClient client,
         string runnerId = "runner_test")
@@ -253,6 +408,22 @@ public sealed class RunnerCommandEndpointTests : IClassFixture<WebApplicationFac
     private static async Task<ClaimCheckContentRef> UploadJsonAsync<T>(HttpClient client, T value, string contentType)
     {
         var bytes = JsonSerializer.SerializeToUtf8Bytes(value, JsonDefaults.Options);
+        return await UploadBytesAsync(client, bytes, contentType);
+    }
+
+    private static Task<ClaimCheckContentRef> UploadTextAsync(
+        HttpClient client,
+        string value,
+        string contentType)
+    {
+        return UploadBytesAsync(client, System.Text.Encoding.UTF8.GetBytes(value), contentType);
+    }
+
+    private static async Task<ClaimCheckContentRef> UploadBytesAsync(
+        HttpClient client,
+        byte[] bytes,
+        string contentType)
+    {
         var upload = new ClaimCheckContentUploadRequest(
             ContentType: contentType,
             Sha256: Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant(),

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using ChatThroughHarness.Protocol;
@@ -100,13 +101,7 @@ public sealed class CliRunnerCommandHandler(
             ["run", "lamplighter-opencode", "submit-turn", "--session", command.AgentSessionId, "--request", requestPath, "--json"],
             cancellationToken);
 
-        return await CompleteFromProcessAsync(
-            command,
-            output,
-            successEventType: RunnerEventTypes.AgentTurnCompleted,
-            failureEventType: RunnerEventTypes.AgentTurnFailed,
-            successContentType: "application/vnd.tradecraft.agent-turn-result+json",
-            cancellationToken);
+        return await CompleteTurnFromProcessAsync(command, output, cancellationToken);
     }
 
     private async Task<RunnerCommandResult> CancelSessionAsync(
@@ -139,6 +134,77 @@ public sealed class CliRunnerCommandHandler(
             return RunnerCommandResult.Completed(resultRef);
         }
 
+        return await CompleteProcessFailureAsync(command, output, failureEventType, cancellationToken);
+    }
+
+    private async Task<RunnerCommandResult> CompleteTurnFromProcessAsync(
+        RunnerCommandEnvelope command,
+        ProcessOutput output,
+        CancellationToken cancellationToken)
+    {
+        if (output.ExitCode != 0)
+        {
+            return await CompleteProcessFailureAsync(
+                command,
+                output,
+                RunnerEventTypes.AgentTurnFailed,
+                cancellationToken);
+        }
+
+        string? resultStatus;
+        try
+        {
+            using var result = JsonDocument.Parse(output.Stdout);
+            resultStatus = result.RootElement.TryGetProperty("status", out var status)
+                && status.ValueKind == JsonValueKind.String
+                    ? status.GetString()
+                    : null;
+        }
+        catch (JsonException ex)
+        {
+            var invalidOutput = output with
+            {
+                ExitCode = -1,
+                Stderr = $"Harness returned invalid AgentTurnResult JSON: {ex.Message}"
+            };
+            return await CompleteProcessFailureAsync(
+                command,
+                invalidOutput,
+                RunnerEventTypes.AgentTurnFailed,
+                cancellationToken);
+        }
+
+        if (string.IsNullOrWhiteSpace(resultStatus))
+        {
+            var invalidOutput = output with
+            {
+                ExitCode = -1,
+                Stderr = "Harness AgentTurnResult JSON did not contain a status."
+            };
+            return await CompleteProcessFailureAsync(
+                command,
+                invalidOutput,
+                RunnerEventTypes.AgentTurnFailed,
+                cancellationToken);
+        }
+
+        var resultRef = await apiClient.UploadContentAsync(
+            output.Stdout,
+            "application/vnd.tradecraft.agent-turn-result+json",
+            cancellationToken);
+        var eventType = resultStatus.Equals("completed", StringComparison.OrdinalIgnoreCase)
+            ? RunnerEventTypes.AgentTurnCompleted
+            : RunnerEventTypes.AgentTurnFailed;
+        await PublishEventAsync(command, eventType, resultRef, cancellationToken);
+        return RunnerCommandResult.Completed(resultRef);
+    }
+
+    private async Task<RunnerCommandResult> CompleteProcessFailureAsync(
+        RunnerCommandEnvelope command,
+        ProcessOutput output,
+        string failureEventType,
+        CancellationToken cancellationToken)
+    {
         var diagnostics = $"""
             command: {output.Command}
             exit_code: {output.ExitCode}

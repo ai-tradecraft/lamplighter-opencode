@@ -104,6 +104,57 @@ public sealed class CliRunnerCommandHandlerTests
         Assert.Equal("text/plain", api.Uploads.Single().ContentType);
     }
 
+    [Fact]
+    public async Task SubmitTurnCommandPublishesFailedEventForStructuredFailure()
+    {
+        var contentRef = new ClaimCheckContentRef("tradecraft://content/turn_1", "sha", "application/json", 2);
+        var api = new FakeRunnerApiClient("""{"id":"turn_1","agent_session_id":"session_1","instruction":"hello"}""");
+        var process = new FakeHarnessProcessRunner(new ProcessOutput(
+            Command: "uv run lamplighter-opencode submit-turn",
+            ExitCode: 0,
+            Stdout: """
+                {
+                  "id": "result_1",
+                  "agent_session_id": "session_1",
+                  "request_id": "turn_1",
+                  "status": "failed",
+                  "message": "OpenCode server request failed.",
+                  "artifact_refs": [],
+                  "changed_files": [],
+                  "commands_observed": [],
+                  "failure_report": {
+                    "summary": "OpenCode server request failed.",
+                    "detail": "Connection refused"
+                  }
+                }
+                """,
+            Stderr: ""));
+        var handler = new CliRunnerCommandHandler(
+            api,
+            process,
+            Options.Create(new RunnerOptions { RunnerId = "runner_1", RuntimeRoot = NewRuntimeRoot() }),
+            NullLogger<CliRunnerCommandHandler>.Instance);
+        var command = new RunnerCommandEnvelope(
+            Id: "cmd_1",
+            RunnerId: "runner_1",
+            AgentSessionId: "session_1",
+            Type: RunnerCommandTypes.SubmitAgentTurn,
+            Status: RunnerCommandStatuses.Claimed,
+            PayloadRef: contentRef,
+            CorrelationId: "turn_1",
+            IdempotencyKey: "turn_1",
+            CreatedAt: DateTimeOffset.UnixEpoch,
+            AvailableAt: DateTimeOffset.UnixEpoch,
+            Lease: new RunnerCommandLease("lease_1", "runner_1", DateTimeOffset.UnixEpoch, DateTimeOffset.UtcNow.AddMinutes(1), 1));
+
+        var result = await handler.HandleAsync(command, CancellationToken.None);
+
+        Assert.Equal(RunnerCommandStatuses.Completed, result.Status);
+        Assert.Single(api.PublishedEvents);
+        Assert.Equal(RunnerEventTypes.AgentTurnFailed, api.PublishedEvents.Single().Type);
+        Assert.Equal("application/vnd.tradecraft.agent-turn-result+json", api.Uploads.Single().ContentType);
+    }
+
     private static string NewRuntimeRoot()
     {
         return Path.Combine(Path.GetTempPath(), Ids.New("runner_handler"));

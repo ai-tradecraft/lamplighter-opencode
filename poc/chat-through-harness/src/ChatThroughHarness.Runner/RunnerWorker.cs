@@ -8,6 +8,7 @@ namespace ChatThroughHarness.Runner;
 public sealed class RunnerWorker(
     IOptions<RunnerOptions> options,
     IRunnerApiClient apiClient,
+    IOpenCodeHealthProbe healthProbe,
     RunnerCommandLoop commandLoop,
     ILogger<RunnerWorker> logger) : BackgroundService
 {
@@ -37,7 +38,11 @@ public sealed class RunnerWorker(
 
     private async Task PublishHeartbeatAsync(CancellationToken cancellationToken)
     {
-        var agents = RunnerAgentInventory.Scan(_options.RuntimeRoot, DateTimeOffset.UtcNow);
+        var agents = await RunnerAgentInventory.ScanAsync(
+            _options.RuntimeRoot,
+            DateTimeOffset.UtcNow,
+            healthProbe,
+            cancellationToken);
         var heartbeat = new RunnerHeartbeat(
             RunnerId: _options.RunnerId,
             Status: "online",
