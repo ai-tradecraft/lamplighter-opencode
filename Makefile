@@ -42,7 +42,7 @@ PRECOMMIT_PATH = $(if $(HOOK_PYTHON_BIN),$(HOOK_PYTHON_BIN):$(PATH),$(PATH))
 PRECOMMIT := uvx pre-commit
 JUST := uvx --from rust-just just
 
-.PHONY: help doctor install-deps setup ci lint qa test-chat-through-harness test-real-backend print-real-backend-fingerprint check-uv
+.PHONY: help doctor install-deps setup ci lint qa run-chat-through-harness test-chat-through-harness test-real-backend print-real-backend-fingerprint check-uv
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
@@ -139,6 +139,9 @@ test-real-backend: check-uv ## Run the opt-in real OpenCode backend integration 
 
 test-chat-through-harness: check-uv ## Run Python + ASP.NET + React checks for the chat-through-harness POC
 	./scripts/test-chat-through-harness.sh
+
+run-chat-through-harness: ## Start the chat POC in three tmux panes and open the portal
+	./scripts/run-chat-through-harness.sh
 
 print-real-backend-fingerprint: check-uv ## Print non-secret fingerprints of real backend env values
 	@if [ -f .env ]; then set -a; . ./.env; set +a; fi; \

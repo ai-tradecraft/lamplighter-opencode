@@ -12,6 +12,29 @@ Optional local env examples are available in:
 - `src/ChatThroughHarness.Runner/.env.example` for runner variables.
 - `client/.env.example` for Vite/React variables.
 
+When already inside a tmux session, start all three services and open the
+portal with:
+
+```sh
+make run-chat-through-harness
+```
+
+This creates a `chat-poc` tmux window with separate API, runner, and UI panes.
+It opens `http://127.0.0.1:5173` in the default browser as soon as Vite is
+ready. The runner loads backend variables from the repo-root `.env`, then
+applies any overrides from
+`poc/chat-through-harness/src/ChatThroughHarness.Runner/.env`.
+
+To use a different tmux window name or portal URL:
+
+```sh
+CHAT_THROUGH_HARNESS_TMUX_WINDOW=my-chat \
+CHAT_THROUGH_HARNESS_URL=http://127.0.0.1:5173 \
+make run-chat-through-harness
+```
+
+For manual startup, use the following three-terminal workflow.
+
 From the `lamplighter-opencode` repo root, start the API:
 
 ```sh
