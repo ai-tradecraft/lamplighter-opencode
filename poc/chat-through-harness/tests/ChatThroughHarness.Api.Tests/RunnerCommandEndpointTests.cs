@@ -110,6 +110,33 @@ public sealed class RunnerCommandEndpointTests : IClassFixture<WebApplicationFac
     }
 
     [Fact]
+    public async Task StaleRunnerHeartbeatIsNotReturnedAsActiveController()
+    {
+        using var client = _factory.CreateClient();
+        var heartbeat = new RunnerHeartbeat(
+            RunnerId: "runner_stale",
+            Status: "online",
+            ActiveCommandIds: [],
+            ObservedAt: DateTimeOffset.UtcNow.AddMinutes(-5),
+            Agents: []);
+
+        var response = await client.PostAsJsonAsync(
+            "/api/runner/heartbeat",
+            heartbeat,
+            RunnerProtocolJson.Options);
+        response.EnsureSuccessStatusCode();
+
+        var controllers = await client.GetFromJsonAsync<IReadOnlyCollection<AgentControllerRecord>>(
+            "/api/agent-controllers",
+            JsonDefaults.Options);
+        Assert.NotNull(controllers);
+        Assert.DoesNotContain(controllers, item => item.RunnerId == "runner_stale");
+
+        var staleController = await client.GetAsync("/api/agent-controllers/runner_stale");
+        Assert.Equal(System.Net.HttpStatusCode.NotFound, staleController.StatusCode);
+    }
+
+    [Fact]
     public async Task RunnerHeartbeatDoesNotOverwriteCancelledSessionStatus()
     {
         using var client = _factory.CreateClient();

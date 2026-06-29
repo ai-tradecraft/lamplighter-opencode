@@ -152,7 +152,11 @@ app.MapGet("/api/agent-controllers", async (
     CancellationToken cancellationToken) =>
 {
     var heartbeats = await runnerStore.GetRunnerHeartbeatsAsync(cancellationToken);
-    return Results.Ok(heartbeats.Select(AgentControllerRecord.FromHeartbeat).ToArray());
+    return Results.Ok(
+        heartbeats
+            .Where(AgentControllerRecord.IsActive)
+            .Select(AgentControllerRecord.FromHeartbeat)
+            .ToArray());
 });
 
 app.MapGet("/api/agent-controllers/{runnerId}", async (
@@ -161,7 +165,9 @@ app.MapGet("/api/agent-controllers/{runnerId}", async (
     CancellationToken cancellationToken) =>
 {
     var heartbeat = await runnerStore.GetRunnerHeartbeatAsync(runnerId, cancellationToken);
-    return heartbeat is null ? Results.NotFound() : Results.Ok(AgentControllerRecord.FromHeartbeat(heartbeat));
+    return heartbeat is null || !AgentControllerRecord.IsActive(heartbeat)
+        ? Results.NotFound()
+        : Results.Ok(AgentControllerRecord.FromHeartbeat(heartbeat));
 });
 
 app.MapPost("/api/agent-sessions", async (
@@ -1137,6 +1143,13 @@ public sealed record AgentControllerRecord(
     DateTimeOffset ObservedAt,
     IReadOnlyList<AgentControllerAgentRecord> Agents)
 {
+    private static readonly TimeSpan ActiveHeartbeatWindow = TimeSpan.FromSeconds(30);
+
+    public static bool IsActive(RunnerHeartbeat heartbeat)
+    {
+        return heartbeat.ObservedAt >= DateTimeOffset.UtcNow - ActiveHeartbeatWindow;
+    }
+
     public static AgentControllerRecord FromHeartbeat(RunnerHeartbeat heartbeat)
     {
         return new AgentControllerRecord(

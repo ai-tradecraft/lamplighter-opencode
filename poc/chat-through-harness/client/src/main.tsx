@@ -88,6 +88,13 @@ function App() {
   const selectedController = useMemo(() => {
     return controllers.find((controller) => controller.runnerId === selectedControllerId) ?? null;
   }, [controllers, selectedControllerId]);
+  const chatPlaceholder = busy
+    ? "Loading agent session..."
+    : !session
+      ? "Select a ready agent to chat"
+      : session.status !== "ready"
+        ? `Agent is ${session.status}; chat is unavailable`
+        : "Send a prompt to the harnessed agent";
 
   useEffect(() => {
     refreshControllers();
@@ -107,7 +114,7 @@ function App() {
         refreshTurn(session.id, event.turnId);
       }
       if (event.type.startsWith("agent_session.")) {
-        refreshSession(session.id);
+        refreshSession(session.id).catch((err) => setError(String(err)));
         refreshControllers();
       }
     };
@@ -135,7 +142,11 @@ function App() {
     }
     const nextControllers = (await response.json()) as AgentController[];
     setControllers(nextControllers);
-    setSelectedControllerId((current) => current ?? nextControllers[0]?.runnerId ?? null);
+    setSelectedControllerId((current) => {
+      return current && nextControllers.some((controller) => controller.runnerId === current)
+        ? current
+        : nextControllers[0]?.runnerId ?? null;
+    });
   }
 
   async function startSession() {
@@ -224,9 +235,10 @@ function App() {
 
   async function refreshSession(sessionId: string) {
     const response = await fetch(`${api}/api/agent-sessions/${sessionId}`);
-    if (response.ok) {
-      setSession((await response.json()) as Session);
+    if (!response.ok) {
+      throw new Error(`Agent session ${sessionId} is no longer available.`);
     }
+    setSession((await response.json()) as Session);
   }
 
   async function refreshTurns(sessionId: string) {
@@ -341,7 +353,7 @@ function App() {
           <input
             value={prompt}
             onChange={(event) => setPrompt(event.target.value)}
-            placeholder="Send a prompt to the harnessed agent"
+            placeholder={chatPlaceholder}
             disabled={!session || session.status !== "ready" || busy}
           />
           <button disabled={!session || session.status !== "ready" || busy || !prompt.trim()}>
