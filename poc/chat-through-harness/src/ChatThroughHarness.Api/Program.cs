@@ -177,6 +177,18 @@ app.MapPost("/api/agent-sessions", async (
     IHubContext<AgentSessionHub> hub,
     CancellationToken cancellationToken) =>
 {
+    if (!string.IsNullOrWhiteSpace(request.ControllerId))
+    {
+        var heartbeat = await runnerStore.GetRunnerHeartbeatAsync(request.ControllerId, cancellationToken);
+        if (heartbeat is null || !AgentControllerRecord.IsActive(heartbeat))
+        {
+            return Results.Conflict(new
+            {
+                message = $"Agent controller {request.ControllerId} is not active."
+            });
+        }
+    }
+
     var session = AgentSessionRecord.Create(request, RuntimePaths.Root);
     await store.UpsertSessionAsync(session, cancellationToken);
     await PublishAsync(store, hub, session.Id, null, "agent_session.preparing", new { session.Id }, cancellationToken);
@@ -1093,7 +1105,17 @@ public readonly record struct StoredClaimCheckContent(ClaimCheckContentRef Conte
 
 public static class RuntimePaths
 {
-    public static string Root => Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../.agent-runtime"));
+    public static string Root
+    {
+        get
+        {
+            var configured = Environment.GetEnvironmentVariable("CHAT_THROUGH_HARNESS_RUNTIME_ROOT");
+            return string.IsNullOrWhiteSpace(configured)
+                ? Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../.agent-runtime"))
+                : Path.GetFullPath(configured);
+        }
+    }
+
     public static string Session(string sessionId) => Path.Combine(Root, "sessions", sessionId);
 }
 

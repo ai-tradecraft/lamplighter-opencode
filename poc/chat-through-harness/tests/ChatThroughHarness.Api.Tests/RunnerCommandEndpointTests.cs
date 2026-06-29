@@ -45,6 +45,7 @@ public sealed class RunnerCommandEndpointTests : IClassFixture<WebApplicationFac
     public async Task CreateSessionForControllerQueuesCommandForThatRunner()
     {
         using var client = _factory.CreateClient();
+        await PostHeartbeatAsync(client, "runner_local");
 
         var response = await client.PostAsJsonAsync(
             "/api/agent-sessions",
@@ -134,12 +135,18 @@ public sealed class RunnerCommandEndpointTests : IClassFixture<WebApplicationFac
 
         var staleController = await client.GetAsync("/api/agent-controllers/runner_stale");
         Assert.Equal(System.Net.HttpStatusCode.NotFound, staleController.StatusCode);
+
+        var createResponse = await client.PostAsJsonAsync(
+            "/api/agent-sessions",
+            new CreateAgentSessionRequest(ControllerId: "runner_stale"));
+        Assert.Equal(System.Net.HttpStatusCode.Conflict, createResponse.StatusCode);
     }
 
     [Fact]
     public async Task RunnerHeartbeatDoesNotOverwriteCancelledSessionStatus()
     {
         using var client = _factory.CreateClient();
+        await PostHeartbeatAsync(client, "runner_terminal");
         var sessionResponse = await client.PostAsJsonAsync(
             "/api/agent-sessions",
             new CreateAgentSessionRequest(ControllerId: "runner_terminal"));
@@ -424,6 +431,21 @@ public sealed class RunnerCommandEndpointTests : IClassFixture<WebApplicationFac
             $"/api/runner/commands?runnerId={runnerId}&wait=0",
             RunnerProtocolJson.Options);
         return commands ?? [];
+    }
+
+    private static async Task PostHeartbeatAsync(HttpClient client, string runnerId)
+    {
+        var heartbeat = new RunnerHeartbeat(
+            RunnerId: runnerId,
+            Status: "online",
+            ActiveCommandIds: [],
+            ObservedAt: DateTimeOffset.UtcNow,
+            Agents: []);
+        var response = await client.PostAsJsonAsync(
+            "/api/runner/heartbeat",
+            heartbeat,
+            RunnerProtocolJson.Options);
+        response.EnsureSuccessStatusCode();
     }
 
     private static async Task<string> ReadContentAsync(HttpClient client, ClaimCheckContentRef contentRef)

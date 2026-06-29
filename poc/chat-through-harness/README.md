@@ -69,6 +69,12 @@ controller to see its allocated agents, create a new agent from that
 controller, or open an existing agent to restore its chat transcript after a
 browser refresh.
 
+Controllers disappear from the active list after 30 seconds without a fresh
+heartbeat. The API also rejects new-agent requests targeting a missing or stale
+controller so commands cannot remain queued for a runner that no longer polls.
+API tests use an isolated temporary runtime root and never register test
+controllers in the development `.agent-runtime`.
+
 The browser-facing API enqueues commands for the local runner. For local runs,
 keep the API and runner pointed at the same `.agent-runtime/` folder under
 `poc/chat-through-harness/`.
