@@ -21,8 +21,9 @@ make run-chat-through-harness
 
 This creates a `chat-poc` tmux window with separate API, runner, and UI panes.
 It opens `http://127.0.0.1:5173` in the default browser as soon as Vite is
-ready. The runner loads backend variables from the repo-root `.env`, then
-applies any overrides from
+ready. The runner and UI wait for the API readiness endpoint before starting,
+so their initial requests do not race the ASP.NET startup. The runner loads
+backend variables from the repo-root `.env`, then applies any overrides from
 `poc/chat-through-harness/src/ChatThroughHarness.Runner/.env`.
 
 To use a different tmux window name or portal URL:

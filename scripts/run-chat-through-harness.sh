@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 POC="$ROOT/poc/chat-through-harness"
 CLIENT="$POC/client"
 SCRIPT="$ROOT/scripts/run-chat-through-harness.sh"
+API_URL="${CHAT_THROUGH_HARNESS_API_URL:-http://127.0.0.1:5087}"
 PORTAL_URL="${CHAT_THROUGH_HARNESS_URL:-http://127.0.0.1:5173}"
 WINDOW_NAME="${CHAT_THROUGH_HARNESS_TMUX_WINDOW:-chat-poc}"
 
@@ -16,6 +17,26 @@ source_env() {
     source "$env_file"
     set +a
   fi
+}
+
+wait_for_service() {
+  local service_name="$1"
+  local url="$2"
+  local attempts="${CHAT_THROUGH_HARNESS_STARTUP_ATTEMPTS:-120}"
+  local attempt
+
+  printf 'Waiting for %s at %s ...\n' "$service_name" "$url"
+  for ((attempt = 1; attempt <= attempts; attempt++)); do
+    if curl --fail --silent "$url" >/dev/null 2>&1; then
+      printf '%s is ready.\n' "$service_name"
+      return 0
+    fi
+    sleep 1
+  done
+
+  printf '%s did not become ready after %s seconds: %s\n' \
+    "$service_name" "$attempts" "$url" >&2
+  return 1
 }
 
 run_api() {
@@ -32,11 +53,15 @@ run_runner() {
   export Runner__OrchestratorBaseUri="${Runner__OrchestratorBaseUri:-http://127.0.0.1:5087}"
   export Runner__RuntimeRoot="${Runner__RuntimeRoot:-$POC/.agent-runtime}"
   export LAMPLIGHTER_OPENCODE_CONFIG_MODE="${LAMPLIGHTER_OPENCODE_CONFIG_MODE:-inherit-global}"
+  wait_for_service \
+    "Tradecraft API" \
+    "${Runner__OrchestratorBaseUri%/}/api/agent-controllers"
   cd "$POC"
   exec dotnet run --project src/ChatThroughHarness.Runner
 }
 
 run_ui() {
+  wait_for_service "Tradecraft API" "${API_URL%/}/api/agent-controllers"
   cd "$CLIENT"
   if [[ ! -d node_modules ]]; then
     npm install
@@ -45,25 +70,14 @@ run_ui() {
 }
 
 open_portal() {
-  local attempts="${CHAT_THROUGH_HARNESS_STARTUP_ATTEMPTS:-120}"
-  local attempt
-
-  for ((attempt = 1; attempt <= attempts; attempt++)); do
-    if curl --fail --silent --show-error "$PORTAL_URL" >/dev/null 2>&1; then
-      if command -v open >/dev/null 2>&1; then
-        open "$PORTAL_URL"
-      elif command -v xdg-open >/dev/null 2>&1; then
-        xdg-open "$PORTAL_URL"
-      else
-        printf 'Portal ready: %s\n' "$PORTAL_URL"
-      fi
-      exit 0
-    fi
-    sleep 1
-  done
-
-  printf 'Portal did not become ready after %s seconds: %s\n' "$attempts" "$PORTAL_URL" >&2
-  exit 1
+  wait_for_service "Chat portal" "$PORTAL_URL"
+  if command -v open >/dev/null 2>&1; then
+    open "$PORTAL_URL"
+  elif command -v xdg-open >/dev/null 2>&1; then
+    xdg-open "$PORTAL_URL"
+  else
+    printf 'Portal ready: %s\n' "$PORTAL_URL"
+  fi
 }
 
 require_command() {
