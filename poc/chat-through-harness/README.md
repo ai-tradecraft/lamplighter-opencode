@@ -20,6 +20,16 @@ make run-chat-through-harness
 ```
 
 This creates a `chat-poc` tmux window with separate API, runner, and UI panes.
+Before launching, the script stops earlier API, runner, and UI processes from
+this checkout. It then waits for the API contract expected by the portal before
+starting the runner or UI. This prevents a newly built portal from silently
+connecting to an older API that still owns port `5087`.
+
+Stop the three POC services explicitly with:
+
+```bash
+make stop-chat-through-harness
+```
 It opens `http://127.0.0.1:5173` in the default browser as soon as Vite is
 ready. The runner and UI wait for the API readiness endpoint before starting,
 so their initial requests do not race the ASP.NET startup. The runner loads

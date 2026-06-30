@@ -36,6 +36,18 @@ var app = builder.Build();
 app.UseCors();
 app.MapHub<AgentSessionHub>("/hubs/agent-sessions");
 
+app.MapGet("/api/system/info", () => Results.Ok(new
+{
+    service = "chat-through-harness-api",
+    contractVersion = 2,
+    capabilities = new[]
+    {
+        "controller-workspaces",
+        "agents",
+        "multi-session-agents"
+    }
+}));
+
 app.MapPost("/api/client-logs", async (
     ClientLogRequest request,
     CentralLogStore logStore,

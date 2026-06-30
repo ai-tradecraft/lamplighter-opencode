@@ -18,6 +18,22 @@ public sealed class RunnerCommandEndpointTests : IClassFixture<WebApplicationFac
     }
 
     [Fact]
+    public async Task SystemInfoPublishesPortalContract()
+    {
+        using var client = _factory.CreateClient();
+
+        using var response = await client.GetAsync("/api/system/info");
+        response.EnsureSuccessStatusCode();
+        using var payload = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+
+        Assert.Equal("chat-through-harness-api", payload.RootElement.GetProperty("service").GetString());
+        Assert.Equal(2, payload.RootElement.GetProperty("contractVersion").GetInt32());
+        Assert.Contains(
+            payload.RootElement.GetProperty("capabilities").EnumerateArray(),
+            capability => capability.GetString() == "multi-session-agents");
+    }
+
+    [Fact]
     public async Task ControllerAgentOwnsMultipleSessions()
     {
         using var client = _factory.CreateClient();

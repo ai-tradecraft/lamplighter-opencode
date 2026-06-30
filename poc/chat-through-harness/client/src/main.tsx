@@ -169,6 +169,22 @@ async function apiFetch(path: string, init?: RequestInit) {
   }
 }
 
+async function responseError(response: Response, fallback: string) {
+  const body = (await response.text()).trim();
+  if (body) {
+    try {
+      const payload = JSON.parse(body) as { message?: string };
+      if (payload.message) {
+        return payload.message;
+      }
+    } catch {
+      return body;
+    }
+    return body;
+  }
+  return `${fallback} (HTTP ${response.status}). The portal and API may be running different versions; restart the POC services.`;
+}
+
 window.addEventListener("error", (event) => {
   reportClientLog("error", "Unhandled browser error.", {
     message: event.message,
@@ -246,7 +262,11 @@ function App() {
   }, []);
 
   useEffect(() => {
-    void refreshControllers();
+    void verifyApiContract().then((compatible) => {
+      if (compatible) {
+        void refreshControllers();
+      }
+    });
     const interval = window.setInterval(() => void refreshControllers(), 5000);
     return () => window.clearInterval(interval);
   }, []);
@@ -318,6 +338,27 @@ function App() {
     }
   }
 
+  async function verifyApiContract() {
+    try {
+      const response = await apiFetch("/api/system/info");
+      if (!response.ok) {
+        setError(await responseError(response, "The API does not expose the required system contract"));
+        return false;
+      }
+      const system = (await response.json()) as { contractVersion?: number };
+      if (system.contractVersion !== 2) {
+        setError(
+          `Portal/API contract mismatch: expected version 2, received ${system.contractVersion ?? "unknown"}. Restart the POC services.`
+        );
+        return false;
+      }
+      return true;
+    } catch (err) {
+      setError(String(err));
+      return false;
+    }
+  }
+
   async function loadAgent(agentId: string) {
     try {
       const [agentResponse, sessionsResponse] = await Promise.all([
@@ -325,7 +366,7 @@ function App() {
         apiFetch(`/api/agents/${agentId}/sessions`)
       ]);
       if (!agentResponse.ok) {
-        throw new Error(`Agent ${agentId} is no longer available.`);
+        throw new Error(await responseError(agentResponse, `Agent ${agentId} is no longer available`));
       }
       setAgent((await agentResponse.json()) as Agent);
       if (sessionsResponse.ok) {
@@ -349,7 +390,7 @@ function App() {
         body: JSON.stringify({})
       });
       if (!response.ok) {
-        throw new Error(await response.text());
+        throw new Error(await responseError(response, "Agent creation failed"));
       }
       const created = (await response.json()) as Agent;
       reportClientLog("information", "Agent creation accepted.", {
@@ -377,7 +418,7 @@ function App() {
         body: JSON.stringify({ goal: "Chat through harness POC" })
       });
       if (!response.ok) {
-        throw new Error(await response.text());
+        throw new Error(await responseError(response, "Session creation failed"));
       }
       const created = (await response.json()) as Session;
       setSessions((current) => [created, ...current.filter((item) => item.id !== created.id)]);
@@ -400,7 +441,7 @@ function App() {
     if (response.ok) {
       setAgent((await response.json()) as Agent);
     } else {
-      setError(await response.text());
+      setError(await responseError(response, "Stopping the agent failed"));
     }
   }
 
