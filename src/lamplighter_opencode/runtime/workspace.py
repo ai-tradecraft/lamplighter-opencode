@@ -586,7 +586,9 @@ def start_agent(
     with _agent_lifecycle_lock(layout.runtime_dir):
         if layout.server_metadata_path.exists():
             existing = _read_json(layout.server_metadata_path)
-            if existing.get("status") in {"planned", "starting", "ready"}:
+            if existing.get("status") == "planned" and dry_run:
+                return existing
+            if existing.get("status") in {"starting", "ready"} and _process_is_running(existing.get("pid")):
                 return existing
         metadata = start_opencode_server(
             layout.root,
@@ -600,6 +602,16 @@ def start_agent(
         agent["status"] = metadata["status"]
         _write_json(layout.metadata_path, agent)
         return metadata
+
+
+def _process_is_running(pid: object) -> bool:
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, PermissionError):
+        return False
+    return True
 
 
 def stop_agent(layout: AgentLayout) -> dict[str, Any]:

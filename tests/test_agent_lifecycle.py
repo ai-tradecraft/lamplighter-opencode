@@ -1,15 +1,17 @@
 """Agent lifecycle command tests."""
 
 import json
+import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from typer.testing import CliRunner
 
+import lamplighter_opencode.runtime.workspace as workspace_module
 from lamplighter_opencode.cli import app
 from lamplighter_opencode.contracts.models import AgentChatSessionSpec
 from lamplighter_opencode.runtime.layout import agent_layout, agent_session_layout
-from lamplighter_opencode.runtime.workspace import create_agent_session
+from lamplighter_opencode.runtime.workspace import create_agent_session, start_agent
 
 runner = CliRunner()
 
@@ -189,6 +191,28 @@ def test_agent_owns_multiple_isolated_sessions(tmp_path: Path, monkeypatch) -> N
     assert json.loads(first.metadata_path.read_text(encoding="utf-8"))["status"] == "cancelled"
     assert json.loads(second.metadata_path.read_text(encoding="utf-8"))["status"] == "ready"
     assert json.loads(agent_layout(controller_workspace, "agent_one").metadata_path.read_text())["status"] == "planned"
+
+
+def test_start_agent_replaces_stale_ready_process_metadata(tmp_path: Path, monkeypatch) -> None:
+    controller_workspace = tmp_path / "controller"
+    layout = agent_layout(controller_workspace, "agent_one")
+    layout.runtime_dir.mkdir(parents=True)
+    layout.workspace_dir.mkdir(parents=True)
+    layout.metadata_path.write_text(json.dumps({"status": "ready"}), encoding="utf-8")
+    layout.server_metadata_path.write_text(
+        json.dumps({"status": "ready", "pid": 999_999}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(os, "kill", lambda pid, signal: (_ for _ in ()).throw(ProcessLookupError()))
+
+    def fake_start(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        return {"status": "ready", "pid": 1234, "endpoint": "http://127.0.0.1:5000"}
+
+    monkeypatch.setattr(workspace_module, "start_opencode_server", fake_start)
+
+    metadata = start_agent(layout)
+
+    assert metadata["pid"] == 1234
 
 
 def test_duplicate_concurrent_session_creation_is_idempotent(tmp_path: Path, monkeypatch) -> None:
