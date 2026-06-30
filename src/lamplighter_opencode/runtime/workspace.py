@@ -21,6 +21,7 @@ from typing import Any
 from urllib.parse import quote, urlencode, urlparse, urlunparse
 
 from lamplighter_opencode.contracts.models import (
+    AgentChatSessionSpec,
     AgentSessionSpec,
     AgentSpec,
     AgentTurnRequest,
@@ -29,7 +30,14 @@ from lamplighter_opencode.contracts.models import (
 )
 from lamplighter_opencode.contracts.validation import validate_contract
 from lamplighter_opencode.runtime.events import append_runtime_event
-from lamplighter_opencode.runtime.layout import AgentLayout, materialize_agent_layout
+from lamplighter_opencode.runtime.layout import (
+    AgentLayout,
+    AgentSessionLayout,
+    agent_layout,
+    agent_session_layout,
+    materialize_agent_layout,
+    materialize_agent_session_layout,
+)
 
 OPENCODE_CONFIG_MODES = {"inherit-global", "project-only", "managed"}
 
@@ -74,6 +82,112 @@ def materialize_agent(
     if opencode_config_mode() != "inherit-global":
         materialize_opencode_config(layout.root)
     return layout
+
+
+def create_agent_session(
+    spec: AgentChatSessionSpec,
+    controller_workspace: Path,
+) -> AgentSessionLayout:
+    """Create one conversation under an existing agent."""
+    spec_value = spec.to_dict()
+    validate_contract("agent_chat_session_spec.schema.json", spec_value)
+    agent = agent_layout(controller_workspace, spec.agent_id)
+    if not agent.metadata_path.exists():
+        raise ValueError(f"Agent is not prepared: {spec.agent_id}")
+
+    layout = materialize_agent_session_layout(controller_workspace, spec.agent_id, spec.session_id)
+    server = _read_json(agent.server_metadata_path)
+    if real_backend_enabled():
+        if _metadata_string(server, "status") != "ready":
+            raise OpenCodeServerError(f"OpenCode server is not ready for {spec.agent_id}")
+        session = _request_json(
+            server,
+            "POST",
+            "/session",
+            query={"directory": str(agent.workspace_dir)},
+            body={"title": f"Lamplighter {spec.session_id}"},
+        )
+        opencode_session_id = _metadata_string(session, "id")
+    else:
+        opencode_session_id = f"fake_{uuid.uuid4().hex}"
+
+    _write_json(
+        layout.metadata_path,
+        {
+            **spec_value,
+            "status": "ready",
+            "opencode_session_id": opencode_session_id,
+            "created_at": datetime.now(UTC).isoformat(),
+        },
+    )
+    _write_json(layout.context_path, spec.context_package)
+    append_runtime_event(
+        layout.events_path,
+        RuntimeEvent(
+            event_type="agent_session.created",
+            agent_session_id=spec.session_id,
+            payload={"agent_id": spec.agent_id, "opencode_session_id": opencode_session_id},
+        ),
+    )
+    return layout
+
+
+def submit_agent_session_turn(
+    request: AgentTurnRequest,
+    controller_workspace: Path,
+    agent_id: str,
+    session_id: str,
+) -> AgentTurnResult:
+    """Submit a turn to a specific child session through its agent server."""
+    if request.agent_id != agent_id or request.session_id != session_id:
+        raise ValueError("Turn request agent_id and session_id must match the command target.")
+    started_at = datetime.now(UTC).isoformat()
+    if not real_backend_enabled():
+        return AgentTurnResult(
+            id=f"result_{uuid.uuid4().hex}",
+            agent_session_id=session_id,
+            request_id=request.id,
+            status="completed",
+            started_at=started_at,
+            ended_at=datetime.now(UTC).isoformat(),
+            message=f"Fake OpenCode response for `{request.instruction}`.",
+        )
+
+    agent = agent_layout(controller_workspace, agent_id)
+    session = agent_session_layout(controller_workspace, agent_id, session_id)
+    server = _read_json(agent.server_metadata_path)
+    session_metadata = _read_json(session.metadata_path)
+    if _metadata_string(server, "status") != "ready":
+        raise OpenCodeServerError(f"OpenCode server is not ready for {agent_id}")
+    opencode_session_id = _metadata_string(session_metadata, "opencode_session_id")
+    prompt = _request_json(
+        server,
+        "POST",
+        f"/session/{quote(opencode_session_id, safe='')}/message",
+        query={"directory": str(agent.workspace_dir)},
+        body={"parts": [{"type": "text", "text": request.instruction}]},
+        timeout=300,
+    )
+    return AgentTurnResult(
+        id=f"result_{uuid.uuid4().hex}",
+        agent_session_id=session_id,
+        request_id=request.id,
+        status="completed",
+        started_at=started_at,
+        ended_at=datetime.now(UTC).isoformat(),
+        message=_extract_text_response(prompt),
+        commands_observed=[f"POST /session/{opencode_session_id}/message"],
+    )
+
+
+def cancel_agent_session(controller_workspace: Path, agent_id: str, session_id: str) -> dict[str, Any]:
+    """Cancel one child session without stopping its parent agent."""
+    layout = agent_session_layout(controller_workspace, agent_id, session_id)
+    metadata = _read_json(layout.metadata_path)
+    metadata["status"] = "cancelled"
+    metadata["ended_at"] = datetime.now(UTC).isoformat()
+    _write_json(layout.metadata_path, metadata)
+    return metadata
 
 
 def materialize_session_workspace(

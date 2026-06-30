@@ -9,16 +9,24 @@ from typing import Annotated
 import typer
 from rich.console import Console
 
-from lamplighter_opencode.contracts.models import AgentSessionSpec, AgentSpec, AgentTurnRequest
+from lamplighter_opencode.contracts.models import (
+    AgentChatSessionSpec,
+    AgentSessionSpec,
+    AgentSpec,
+    AgentTurnRequest,
+)
 from lamplighter_opencode.contracts.validation import ContractValidationError, validate_contract
 from lamplighter_opencode.runtime.layout import agent_layout
 from lamplighter_opencode.runtime.workspace import (
+    cancel_agent_session,
+    create_agent_session,
     materialize_agent,
     materialize_session_workspace,
     start_agent,
     start_opencode_server,
     stop_agent,
     stream_opencode_events,
+    submit_agent_session_turn,
 )
 from lamplighter_opencode.runtime.workspace import submit_turn as submit_turn_request
 
@@ -141,6 +149,50 @@ def stop_agent_command(
     console.print(f"Stopped Lamplighter agent {agent}")
 
 
+@app.command("create-session")
+def create_session_command(
+    agent: Annotated[str, typer.Option()],
+    spec: Annotated[Path, typer.Option(exists=True, readable=True, dir_okay=False)],
+    controller_workspace: ControllerWorkspaceOption,
+    json_output: JsonOutputOption = False,
+) -> None:
+    """Create one conversation within a prepared agent."""
+    try:
+        spec_value = _read_json_object(spec)
+        validate_contract("agent_chat_session_spec.schema.json", spec_value)
+        session_spec = AgentChatSessionSpec.from_dict(spec_value)
+        if session_spec.agent_id != agent:
+            raise ValueError("Session spec agent_id must match --agent.")
+        layout = create_agent_session(session_spec, controller_workspace)
+        metadata = _read_json_object(layout.metadata_path)
+    except (ContractValidationError, OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        console.print(f"[red]Failed to create session:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    if json_output:
+        typer.echo(json.dumps(metadata, indent=2))
+        return
+    console.print(f"Created session {session_spec.session_id} in {agent}")
+
+
+@app.command("cancel-session")
+def cancel_session_command(
+    agent: Annotated[str, typer.Option()],
+    session: Annotated[str, typer.Option()],
+    controller_workspace: ControllerWorkspaceOption,
+    json_output: JsonOutputOption = False,
+) -> None:
+    """Cancel one conversation without stopping its agent."""
+    try:
+        metadata = cancel_agent_session(controller_workspace, agent, session)
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        console.print(f"[red]Failed to cancel session:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    if json_output:
+        typer.echo(json.dumps(metadata, indent=2))
+        return
+    console.print(f"Cancelled session {session}")
+
+
 @app.command("prepare-session")
 def prepare_session(
     spec_path: SpecPathArgument = None,
@@ -193,6 +245,8 @@ def prepare_session(
 def submit_turn(
     session: Annotated[str, typer.Option()],
     request: Annotated[Path, typer.Option(exists=True, readable=True, dir_okay=False)],
+    agent: Annotated[str | None, typer.Option()] = None,
+    controller_workspace: Annotated[Path | None, typer.Option()] = None,
     json_output: JsonOutputOption = False,
 ) -> None:
     """Submit a prompt_response AgentTurnRequest to a prepared session."""
@@ -207,7 +261,12 @@ def submit_turn(
     if turn_request.agent_session_id != session:
         raise typer.BadParameter("Request agent_session_id must match --session.")
 
-    result = submit_turn_request(turn_request, request.resolve().parent)
+    if agent is not None or controller_workspace is not None:
+        if agent is None or controller_workspace is None:
+            raise typer.BadParameter("--agent and --controller-workspace must be provided together.")
+        result = submit_agent_session_turn(turn_request, controller_workspace, agent, session)
+    else:
+        result = submit_turn_request(turn_request, request.resolve().parent)
     if json_output:
         typer.echo(json.dumps(result.to_dict(), indent=2))
     else:

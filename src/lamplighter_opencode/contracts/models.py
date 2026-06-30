@@ -239,6 +239,8 @@ class AgentTurnRequest:
     allowed_paths: list[str] = field(default_factory=list)
     expected_artifacts: list[str] = field(default_factory=list)
     correlation_id: str | None = None
+    agent_id: str | None = None
+    session_id: str | None = None
     timeout_policy: JsonObject = field(default_factory=dict)
 
     @classmethod
@@ -253,6 +255,8 @@ class AgentTurnRequest:
             allowed_paths=value.get("allowed_paths", []),
             expected_artifacts=value.get("expected_artifacts", []),
             correlation_id=value.get("correlation_id"),
+            agent_id=value.get("agent_id"),
+            session_id=value.get("session_id"),
             timeout_policy=value.get("timeout_policy", {}),
         )
 
@@ -267,6 +271,8 @@ class AgentTurnRequest:
             "allowed_paths": self.allowed_paths,
             "expected_artifacts": self.expected_artifacts,
             "correlation_id": self.correlation_id,
+            "agent_id": self.agent_id,
+            "session_id": self.session_id,
             "timeout_policy": self.timeout_policy,
         }
 

@@ -6,7 +6,7 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from lamplighter_opencode.cli import app
-from lamplighter_opencode.runtime.layout import agent_layout
+from lamplighter_opencode.runtime.layout import agent_layout, agent_session_layout
 
 runner = CliRunner()
 
@@ -76,6 +76,118 @@ def test_prepare_start_and_stop_agent(tmp_path: Path, monkeypatch) -> None:
     assert metadata["status"] == "stopped"
 
 
+def test_agent_owns_multiple_isolated_sessions(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("LAMPLIGHTER_OPENCODE_USE_REAL_BACKEND", raising=False)
+    controller_workspace = tmp_path / "controller"
+    spec_path = tmp_path / "agent-spec.json"
+    spec_path.write_text(json.dumps(_agent_spec()), encoding="utf-8")
+    assert (
+        runner.invoke(
+            app,
+            [
+                "prepare-agent",
+                "--spec",
+                str(spec_path),
+                "--controller-workspace",
+                str(controller_workspace),
+                "--skip-backend-env-check",
+                "--json",
+            ],
+        ).exit_code
+        == 0
+    )
+    assert (
+        runner.invoke(
+            app,
+            [
+                "start-agent",
+                "--agent",
+                "agent_one",
+                "--controller-workspace",
+                str(controller_workspace),
+                "--dry-run",
+                "--json",
+            ],
+        ).exit_code
+        == 0
+    )
+
+    session_metadata = []
+    for session_id in ("session_one", "session_two"):
+        session_spec_path = tmp_path / f"{session_id}.json"
+        session_spec_path.write_text(json.dumps(_session_spec(session_id)), encoding="utf-8")
+        created = runner.invoke(
+            app,
+            [
+                "create-session",
+                "--agent",
+                "agent_one",
+                "--spec",
+                str(session_spec_path),
+                "--controller-workspace",
+                str(controller_workspace),
+                "--json",
+            ],
+        )
+        assert created.exit_code == 0, created.stdout
+        session_metadata.append(json.loads(created.stdout))
+
+    first = agent_session_layout(controller_workspace, "agent_one", "session_one")
+    second = agent_session_layout(controller_workspace, "agent_one", "session_two")
+    assert first.root != second.root
+    assert session_metadata[0]["opencode_session_id"] != session_metadata[1]["opencode_session_id"]
+
+    request_path = tmp_path / "turn.json"
+    request_path.write_text(
+        json.dumps(
+            {
+                "id": "turn_one",
+                "agent_session_id": "session_one",
+                "agent_id": "agent_one",
+                "session_id": "session_one",
+                "type": "prompt_response",
+                "instruction": "hello",
+            }
+        ),
+        encoding="utf-8",
+    )
+    turn = runner.invoke(
+        app,
+        [
+            "submit-turn",
+            "--agent",
+            "agent_one",
+            "--session",
+            "session_one",
+            "--request",
+            str(request_path),
+            "--controller-workspace",
+            str(controller_workspace),
+            "--json",
+        ],
+    )
+    assert turn.exit_code == 0, turn.stdout
+    assert "Fake OpenCode response" in turn.stdout
+
+    cancelled = runner.invoke(
+        app,
+        [
+            "cancel-session",
+            "--agent",
+            "agent_one",
+            "--session",
+            "session_one",
+            "--controller-workspace",
+            str(controller_workspace),
+            "--json",
+        ],
+    )
+    assert cancelled.exit_code == 0, cancelled.stdout
+    assert json.loads(first.metadata_path.read_text(encoding="utf-8"))["status"] == "cancelled"
+    assert json.loads(second.metadata_path.read_text(encoding="utf-8"))["status"] == "ready"
+    assert json.loads(agent_layout(controller_workspace, "agent_one").metadata_path.read_text())["status"] == "planned"
+
+
 def _agent_spec() -> dict[str, object]:
     return {
         "agent_id": "agent_one",
@@ -92,5 +204,16 @@ def _agent_spec() -> dict[str, object]:
         },
         "tool_profile": {},
         "mcp_profile": {},
+        "telemetry": {},
+    }
+
+
+def _session_spec(session_id: str) -> dict[str, object]:
+    return {
+        "session_id": session_id,
+        "agent_id": "agent_one",
+        "context_package": {"goal": "test chat"},
+        "artifact_contract": {},
+        "timeout_policy": {},
         "telemetry": {},
     }
