@@ -87,6 +87,27 @@ artifacts, and cancellation lifecycle.
 Agent and session lists hide terminal resources by default. Select **Show all**
 to include historical agents or sessions.
 
+## Chat History
+
+OpenCode is the authoritative source for user and assistant message content.
+When the portal opens a session, it requests
+`POST /api/agent-sessions/{sessionId}/history/sync`. The API queues an outbound
+runner command; the local runner reads the OpenCode session, uploads a
+normalized snapshot by claim check, and emits
+`agent_session.history_synced`. The portal refreshes its transcript when that
+event arrives.
+
+Tradecraft retains responsibility for command status, failures, diagnostics,
+ownership, permissions, and audit metadata. Its transcript is therefore an
+enriched projection of OpenCode messages rather than an independent
+conversation. Stable OpenCode message IDs make repeated synchronization
+idempotent and allow history created outside the portal to appear there.
+
+If the local OpenCode service is unavailable, the runner emits
+`agent_session.history_sync_failed`. The session remains usable when otherwise
+ready, and the portal keeps the last successfully projected transcript. No
+cloud component connects directly to the local OpenCode endpoint.
+
 Controllers disappear from the active list after 30 seconds without a fresh
 heartbeat. The API also rejects new-agent requests targeting a missing or stale
 controller so commands cannot remain queued for a runner that no longer polls.
