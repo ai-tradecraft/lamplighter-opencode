@@ -63,11 +63,17 @@ npm run dev
 Open the Vite URL shown in the client terminal, usually
 `http://127.0.0.1:5173`.
 
-The portal opens on the active controller list. The local runner reports its
-controller heartbeat and local agent inventory every few seconds. Select a
-controller to see its allocated agents, create a new agent from that
-controller, or open an existing agent to restore its chat transcript after a
-browser refresh.
+The portal opens on the active controller list. Select a controller to inspect
+its heartbeat and allocated agents, select an agent to inspect its runtime and
+available sessions, and select a session to open its chat, runtime events, and
+diagnostics. The local runner reports its controller heartbeat and local agent
+inventory every few seconds.
+
+In this POC, a provisioned OpenCode agent currently owns one Tradecraft chat
+session, so the agent page contains one session. The separate controller,
+agent, and session views preserve the intended hierarchy for adding multiple
+sessions per agent later without coupling the chat UI to the controller
+inventory.
 
 The Agents list hides `stopped` and `cancelled` sessions by default. Select
 **Show all** beside the Agents heading to include historical sessions.
