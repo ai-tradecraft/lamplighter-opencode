@@ -69,14 +69,13 @@ available sessions, and select a session to open its chat, runtime events, and
 diagnostics. The local runner reports its controller heartbeat and local agent
 inventory every few seconds.
 
-In this POC, a provisioned OpenCode agent currently owns one Tradecraft chat
-session, so the agent page contains one session. The separate controller,
-agent, and session views preserve the intended hierarchy for adding multiple
-sessions per agent later without coupling the chat UI to the controller
-inventory.
+Each provisioned agent owns an isolated workspace, runtime directory, and
+OpenCode server. An agent can own multiple chat sessions. Sessions share their
+agent's workspace and server but retain independent conversation state, events,
+artifacts, and cancellation lifecycle.
 
-The Agents list hides `stopped` and `cancelled` sessions by default. Select
-**Show all** beside the Agents heading to include historical sessions.
+Agent and session lists hide terminal resources by default. Select **Show all**
+to include historical agents or sessions.
 
 Controllers disappear from the active list after 30 seconds without a fresh
 heartbeat. The API also rejects new-agent requests targeting a missing or stale
@@ -84,9 +83,28 @@ controller so commands cannot remain queued for a runner that no longer polls.
 API tests use an isolated temporary runtime root and never register test
 controllers in the development `.agent-runtime`.
 
-The browser-facing API enqueues commands for the local runner. For local runs,
-keep the API and runner pointed at the same `.agent-runtime/` folder under
-`poc/chat-through-harness/`.
+The browser-facing API enqueues commands for the local runner and does not
+construct local filesystem paths. The runner owns its local storage beneath
+`LAMPLIGHTER_CONTROLLER_WORKSPACE`.
+
+When that variable is not set, the controller workspace defaults to:
+
+```text
+macOS:   $HOME/Library/Application Support/lamplighter/workspace
+Linux:  ${XDG_DATA_HOME:-$HOME/.local/share}/lamplighter/workspace
+Windows: %LOCALAPPDATA%\lamplighter\workspace
+```
+
+The resulting layout is:
+
+```text
+<controller-workspace>/agents/<agent-id>/
+|-- workspace/
+`-- runtime/
+    |-- opencode-server.json
+    |-- logs/
+    `-- sessions/<session-id>/
+```
 
 ## Test
 
@@ -106,12 +124,14 @@ To include the opt-in real OpenCode backend integration test:
 RUN_REAL_BACKEND=1 make test-chat-through-harness
 ```
 
-Runtime files are written under `poc/chat-through-harness/.agent-runtime/`.
+The API keeps its POC control-plane records under
+`poc/chat-through-harness/.agent-runtime/`. Agent workspaces and runtime files
+are stored under the controller workspace described above.
 
 ## Central Logs
 
 `make run-chat-through-harness` writes component logs under
-`poc/chat-through-harness/.agent-runtime/logs/`:
+`<controller-workspace>/logs/`:
 
 - `api.log`: ASP.NET lifecycle, requests, and failures.
 - `runner.log`: controller heartbeats, command processing, and harness process
@@ -119,7 +139,7 @@ Runtime files are written under `poc/chat-through-harness/.agent-runtime/`.
 - `ui.log`: Vite development-server output.
 - `browser.jsonl`: sanitized browser, API-request, SignalR, and UI lifecycle
   diagnostics posted by the React client.
-- `opencode/<session-id>.stdout.log` and `.stderr.log`: per-agent
+- `agents/<agent-id>/runtime/logs/opencode/`: per-agent
   `opencode serve` output.
 
 Application-generated lifecycle entries do not intentionally include prompt
@@ -131,8 +151,8 @@ directory with `CHAT_THROUGH_HARNESS_LOG_ROOT`.
 Watch all top-level component logs:
 
 ```sh
-tail -F poc/chat-through-harness/.agent-runtime/logs/{api,runner,ui}.log \
-  poc/chat-through-harness/.agent-runtime/logs/browser.jsonl
+tail -F "$LAMPLIGHTER_CONTROLLER_WORKSPACE"/logs/{api,runner,ui}.log \
+  "$LAMPLIGHTER_CONTROLLER_WORKSPACE"/logs/browser.jsonl
 ```
 
 ## Real Backend Configuration

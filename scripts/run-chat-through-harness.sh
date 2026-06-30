@@ -9,8 +9,27 @@ API_URL="${CHAT_THROUGH_HARNESS_API_URL:-http://127.0.0.1:5087}"
 PORTAL_URL="${CHAT_THROUGH_HARNESS_URL:-http://127.0.0.1:5173}"
 WINDOW_NAME="${CHAT_THROUGH_HARNESS_TMUX_WINDOW:-chat-poc}"
 
+controller_workspace() {
+  if [[ -n "${LAMPLIGHTER_CONTROLLER_WORKSPACE:-}" ]]; then
+    printf '%s\n' "$LAMPLIGHTER_CONTROLLER_WORKSPACE"
+    return
+  fi
+
+  case "$(uname -s)" in
+    Darwin)
+      printf '%s\n' "$HOME/Library/Application Support/lamplighter/workspace"
+      ;;
+    MINGW*|MSYS*|CYGWIN*)
+      printf '%s\n' "${LOCALAPPDATA:?LOCALAPPDATA is required}/lamplighter/workspace"
+      ;;
+    *)
+      printf '%s\n' "${XDG_DATA_HOME:-$HOME/.local/share}/lamplighter/workspace"
+      ;;
+  esac
+}
+
 central_log_root() {
-  printf '%s\n' "${CHAT_THROUGH_HARNESS_LOG_ROOT:-$POC/.agent-runtime/logs}"
+  printf '%s\n' "${CHAT_THROUGH_HARNESS_LOG_ROOT:-$(controller_workspace)/logs}"
 }
 
 run_logged() {
@@ -76,6 +95,7 @@ run_runner() {
   source_env "$POC/src/ChatThroughHarness.Runner/.env"
   export Runner__RunnerId="${Runner__RunnerId:-runner_local}"
   export Runner__OrchestratorBaseUri="${Runner__OrchestratorBaseUri:-http://127.0.0.1:5087}"
+  export LAMPLIGHTER_CONTROLLER_WORKSPACE="${LAMPLIGHTER_CONTROLLER_WORKSPACE:-$(controller_workspace)}"
   export LAMPLIGHTER_OPENCODE_CONFIG_MODE="${LAMPLIGHTER_OPENCODE_CONFIG_MODE:-inherit-global}"
   wait_for_service \
     "Tradecraft API" \
