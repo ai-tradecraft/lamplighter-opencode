@@ -9,11 +9,15 @@ from typing import Annotated
 import typer
 from rich.console import Console
 
-from lamplighter_opencode.contracts.models import AgentSessionSpec, AgentTurnRequest
+from lamplighter_opencode.contracts.models import AgentSessionSpec, AgentSpec, AgentTurnRequest
 from lamplighter_opencode.contracts.validation import ContractValidationError, validate_contract
+from lamplighter_opencode.runtime.layout import agent_layout
 from lamplighter_opencode.runtime.workspace import (
+    materialize_agent,
     materialize_session_workspace,
+    start_agent,
     start_opencode_server,
+    stop_agent,
     stream_opencode_events,
 )
 from lamplighter_opencode.runtime.workspace import submit_turn as submit_turn_request
@@ -46,6 +50,10 @@ SkipBackendEnvCheckOption = Annotated[
     bool,
     typer.Option(help="Skip backend environment variable presence checks. Intended for contract-only tests."),
 ]
+ControllerWorkspaceOption = Annotated[
+    Path,
+    typer.Option(help="Controller-owned root containing isolated agent workspaces."),
+]
 
 
 @app.callback(invoke_without_command=True)
@@ -54,6 +62,83 @@ def main(ctx: typer.Context) -> None:
     if ctx.invoked_subcommand is not None:
         return
     console.print("Welcome to Lamplighter for OpenCode")
+
+
+@app.command("prepare-agent")
+def prepare_agent(
+    spec: Annotated[Path, typer.Option(exists=True, readable=True, dir_okay=False)],
+    controller_workspace: ControllerWorkspaceOption,
+    skip_backend_env_check: SkipBackendEnvCheckOption = False,
+    json_output: JsonOutputOption = False,
+) -> None:
+    """Validate and materialize one isolated agent workspace."""
+    try:
+        spec_value = _read_json_object(spec)
+        validate_contract("agent_spec.schema.json", spec_value)
+        agent_spec = AgentSpec.from_dict(spec_value)
+        layout = materialize_agent(
+            agent_spec,
+            controller_workspace,
+            validate_backend_environment=not skip_backend_env_check,
+        )
+    except (ContractValidationError, OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        console.print(f"[red]Failed to prepare agent:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    result = {
+        "agent_id": agent_spec.agent_id,
+        "status": "allocated",
+        "workspace_path": str(layout.workspace_dir),
+        "runtime_path": str(layout.runtime_dir),
+    }
+    if json_output:
+        typer.echo(json.dumps(result, indent=2))
+        return
+    console.print(f"Prepared Lamplighter agent {agent_spec.agent_id}")
+
+
+@app.command("start-agent")
+def start_agent_command(
+    agent: Annotated[str, typer.Option()],
+    controller_workspace: ControllerWorkspaceOption,
+    host: Annotated[str, typer.Option(help="Host for the local OpenCode server.")] = "127.0.0.1",
+    port: Annotated[int, typer.Option(help="Port for the local OpenCode server. Use 0 to choose a free port.")] = 0,
+    dry_run: Annotated[bool, typer.Option(help="Write endpoint metadata without launching OpenCode.")] = False,
+    json_output: JsonOutputOption = False,
+) -> None:
+    """Start the single supervised OpenCode server owned by an agent."""
+    layout = agent_layout(controller_workspace, agent)
+    if not layout.metadata_path.exists():
+        console.print(f"[red]Failed to start agent:[/red] {agent} is not prepared.")
+        raise typer.Exit(code=1)
+    try:
+        metadata = start_agent(layout, host=host, port=port, dry_run=dry_run)
+    except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
+        console.print(f"[red]Failed to start agent:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    if json_output:
+        typer.echo(json.dumps({"agent_id": agent, **metadata}, indent=2))
+        return
+    console.print(f"Agent OpenCode server {metadata['status']} at {metadata['endpoint']}")
+
+
+@app.command("stop-agent")
+def stop_agent_command(
+    agent: Annotated[str, typer.Option()],
+    controller_workspace: ControllerWorkspaceOption,
+    json_output: JsonOutputOption = False,
+) -> None:
+    """Stop an agent's OpenCode server without deleting its workspace."""
+    layout = agent_layout(controller_workspace, agent)
+    try:
+        metadata = stop_agent(layout)
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        console.print(f"[red]Failed to stop agent:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    if json_output:
+        typer.echo(json.dumps({"agent_id": agent, **metadata}, indent=2))
+        return
+    console.print(f"Stopped Lamplighter agent {agent}")
 
 
 @app.command("prepare-session")

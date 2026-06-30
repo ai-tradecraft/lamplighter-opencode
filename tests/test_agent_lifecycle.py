@@ -1,0 +1,96 @@
+"""Agent lifecycle command tests."""
+
+import json
+from pathlib import Path
+
+from typer.testing import CliRunner
+
+from lamplighter_opencode.cli import app
+from lamplighter_opencode.runtime.layout import agent_layout
+
+runner = CliRunner()
+
+
+def test_prepare_start_and_stop_agent(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("CHAT_THROUGH_HARNESS_LOG_ROOT", raising=False)
+    spec_path = tmp_path / "agent-spec.json"
+    spec_path.write_text(json.dumps(_agent_spec()), encoding="utf-8")
+    controller_workspace = tmp_path / "controller"
+
+    prepared = runner.invoke(
+        app,
+        [
+            "prepare-agent",
+            "--spec",
+            str(spec_path),
+            "--controller-workspace",
+            str(controller_workspace),
+            "--skip-backend-env-check",
+            "--json",
+        ],
+    )
+
+    assert prepared.exit_code == 0, prepared.stdout
+    layout = agent_layout(controller_workspace, "agent_one")
+    assert layout.workspace_dir.is_dir()
+    assert layout.runtime_dir.is_dir()
+    assert layout.metadata_path.is_file()
+
+    started = runner.invoke(
+        app,
+        [
+            "start-agent",
+            "--agent",
+            "agent_one",
+            "--controller-workspace",
+            str(controller_workspace),
+            "--port",
+            "4097",
+            "--dry-run",
+            "--json",
+        ],
+    )
+
+    assert started.exit_code == 0, started.stdout
+    assert layout.server_metadata_path.is_file()
+    metadata = json.loads(layout.server_metadata_path.read_text(encoding="utf-8"))
+    assert metadata["status"] == "planned"
+    assert metadata["workspace"] == str(layout.workspace_dir)
+    assert Path(metadata["stdout_log"]).is_relative_to(layout.logs_dir)
+
+    stopped = runner.invoke(
+        app,
+        [
+            "stop-agent",
+            "--agent",
+            "agent_one",
+            "--controller-workspace",
+            str(controller_workspace),
+            "--json",
+        ],
+    )
+
+    assert stopped.exit_code == 0, stopped.stdout
+    assert layout.workspace_dir.is_dir()
+    metadata = json.loads(layout.server_metadata_path.read_text(encoding="utf-8"))
+    assert metadata["status"] == "stopped"
+
+
+def _agent_spec() -> dict[str, object]:
+    return {
+        "agent_id": "agent_one",
+        "workspace_ref": "controller://agents/agent_one/workspace",
+        "backend": {
+            "kind": "opencode",
+            "server": {"host": "127.0.0.1", "port": 4096},
+            "config": {
+                "provider": "azure",
+                "model": "azure/{env:AZURE_OPENAI_DEPLOYMENT}",
+                "wire_api": "responses",
+            },
+            "required_env_vars": [],
+        },
+        "tool_profile": {},
+        "mcp_profile": {},
+        "telemetry": {},
+    }

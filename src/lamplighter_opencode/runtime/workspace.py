@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import signal
 import socket
 import subprocess
 import time
@@ -19,9 +20,16 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlencode, urlparse, urlunparse
 
-from lamplighter_opencode.contracts.models import AgentSessionSpec, AgentTurnRequest, AgentTurnResult, RuntimeEvent
+from lamplighter_opencode.contracts.models import (
+    AgentSessionSpec,
+    AgentSpec,
+    AgentTurnRequest,
+    AgentTurnResult,
+    RuntimeEvent,
+)
 from lamplighter_opencode.contracts.validation import validate_contract
 from lamplighter_opencode.runtime.events import append_runtime_event
+from lamplighter_opencode.runtime.layout import AgentLayout, materialize_agent_layout
 
 OPENCODE_CONFIG_MODES = {"inherit-global", "project-only", "managed"}
 
@@ -44,6 +52,28 @@ class SessionWorkspace:
     artifacts_dir: Path
     logs_dir: Path
     workspace_dir: Path
+
+
+def materialize_agent(
+    spec: AgentSpec,
+    controller_workspace: Path,
+    *,
+    validate_backend_environment: bool = True,
+) -> AgentLayout:
+    """Create one isolated agent workspace and persist its launch contract."""
+    from lamplighter_opencode.backends.environment import validate_required_environment
+
+    spec_value = spec.to_dict()
+    validate_contract("agent_spec.schema.json", spec_value)
+    if validate_backend_environment:
+        validate_required_environment(spec.backend.required_env_vars)
+
+    layout = materialize_agent_layout(controller_workspace, spec.agent_id)
+    _write_json(layout.metadata_path, {**spec_value, "status": "allocated"})
+    _write_json(layout.backend_config_path, spec.backend.to_dict())
+    if opencode_config_mode() != "inherit-global":
+        materialize_opencode_config(layout.root)
+    return layout
 
 
 def materialize_session_workspace(
@@ -309,14 +339,19 @@ def start_opencode_server(
     port: int = 0,
     dry_run: bool = False,
     timeout_seconds: float = 15,
+    metadata_path: Path | None = None,
+    logs_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Start a supervised opencode serve process and persist endpoint metadata."""
     root = root.resolve()
     workspace = root / "workspace"
     configured_log_root = os.environ.get("CHAT_THROUGH_HARNESS_LOG_ROOT")
     logs = (
-        Path(configured_log_root).expanduser().resolve() if configured_log_root else root.parent.parent / "logs"
-    ) / "opencode"
+        logs_dir
+        or (Path(configured_log_root).expanduser().resolve() if configured_log_root else root.parent.parent / "logs")
+        / "opencode"
+    )
+    server_metadata_path = metadata_path or root / "opencode-server.json"
     workspace.mkdir(parents=True, exist_ok=True)
     logs.mkdir(parents=True, exist_ok=True)
     stdout_log = logs / f"{root.name}.stdout.log"
@@ -349,7 +384,7 @@ def start_opencode_server(
     }
 
     if dry_run:
-        _write_json(root / "opencode-server.json", metadata)
+        _write_json(server_metadata_path, metadata)
         return metadata
 
     stdout_file = stdout_log.open("a", encoding="utf-8")
@@ -366,7 +401,7 @@ def start_opencode_server(
         env=env,
     )
     metadata["pid"] = process.pid
-    _write_json(root / "opencode-server.json", metadata)
+    _write_json(server_metadata_path, metadata)
 
     try:
         _wait_for_opencode_health(endpoint, password, timeout_seconds)
@@ -374,12 +409,53 @@ def start_opencode_server(
         process.terminate()
         metadata["status"] = "failed"
         metadata["ended_at"] = datetime.now(UTC).isoformat()
-        _write_json(root / "opencode-server.json", metadata)
+        _write_json(server_metadata_path, metadata)
         raise
 
     metadata["status"] = "ready"
     metadata["ready_at"] = datetime.now(UTC).isoformat()
-    _write_json(root / "opencode-server.json", metadata)
+    _write_json(server_metadata_path, metadata)
+    return metadata
+
+
+def start_agent(
+    layout: AgentLayout,
+    *,
+    host: str = "127.0.0.1",
+    port: int = 0,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Start the single OpenCode server owned by an agent."""
+    metadata = start_opencode_server(
+        layout.root,
+        host=host,
+        port=port,
+        dry_run=dry_run,
+        metadata_path=layout.server_metadata_path,
+        logs_dir=layout.logs_dir / "opencode",
+    )
+    agent = _read_json(layout.metadata_path)
+    agent["status"] = metadata["status"]
+    _write_json(layout.metadata_path, agent)
+    return metadata
+
+
+def stop_agent(layout: AgentLayout) -> dict[str, Any]:
+    """Stop an agent's OpenCode server while retaining its workspace."""
+    metadata = _read_json(layout.server_metadata_path)
+    pid = metadata.get("pid")
+    if isinstance(pid, int):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    metadata["status"] = "stopped"
+    metadata["ended_at"] = datetime.now(UTC).isoformat()
+    _write_json(layout.server_metadata_path, metadata)
+
+    agent = _read_json(layout.metadata_path)
+    agent["status"] = "stopped"
+    _write_json(layout.metadata_path, agent)
     return metadata
 
 
