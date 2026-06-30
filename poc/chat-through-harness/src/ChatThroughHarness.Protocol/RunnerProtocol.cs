@@ -5,6 +5,9 @@ namespace ChatThroughHarness.Protocol;
 
 public static class RunnerCommandTypes
 {
+    public const string PrepareAgent = "agent.prepare";
+    public const string StopAgent = "agent.stop";
+    public const string CreateAgentSession = "agent_session.create";
     public const string PrepareAgentSession = "agent_session.prepare";
     public const string SubmitAgentTurn = "agent_turn.submit";
     public const string CancelAgentSession = "agent_session.cancel";
@@ -15,6 +18,10 @@ public static class RunnerCommandTypes
 public static class RunnerEventTypes
 {
     public const string RunnerRegistered = "runner.registered";
+    public const string AgentReady = "agent.ready";
+    public const string AgentFailed = "agent.failed";
+    public const string AgentStopped = "agent.stopped";
+    public const string AgentSessionCreated = "agent_session.created";
     public const string AgentSessionReady = "agent_session.ready";
     public const string AgentSessionFailed = "agent_session.failed";
     public const string AgentTurnOutputDelta = "agent_turn.output_delta";

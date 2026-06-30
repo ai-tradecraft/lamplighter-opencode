@@ -17,6 +17,19 @@ public static class RunnerAgentInventory
         IOpenCodeHealthProbe healthProbe,
         CancellationToken cancellationToken)
     {
+        var agentsRoot = Path.Combine(runtimeRoot, "agents");
+        if (Directory.Exists(agentsRoot))
+        {
+            var managedAgents = await Task.WhenAll(
+                Directory.EnumerateDirectories(agentsRoot)
+                    .Select(path => ReadManagedAgentAsync(path, observedAt, healthProbe, cancellationToken)));
+            return managedAgents
+                .Where(item => item is not null)
+                .Select(item => item!)
+                .OrderBy(item => item.AgentId, StringComparer.Ordinal)
+                .ToArray();
+        }
+
         var sessionsRoot = Path.Combine(runtimeRoot, "sessions");
         if (!Directory.Exists(sessionsRoot))
         {
@@ -30,6 +43,104 @@ public static class RunnerAgentInventory
             .Where(item => item is not null)
             .Select(item => item!)
             .OrderBy(item => item.AgentSessionId, StringComparer.Ordinal)
+            .ToArray();
+    }
+
+    private static async Task<RunnerAgentInventoryItem?> ReadManagedAgentAsync(
+        string agentRoot,
+        DateTimeOffset observedAt,
+        IOpenCodeHealthProbe healthProbe,
+        CancellationToken cancellationToken)
+    {
+        var metadataPath = Path.Combine(agentRoot, "agent.json");
+        if (!File.Exists(metadataPath))
+        {
+            return null;
+        }
+
+        using var metadata = JsonDocument.Parse(File.ReadAllText(metadataPath));
+        var agentId = ReadString(metadata.RootElement, "agent_id") ?? Path.GetFileName(agentRoot);
+        var status = ReadString(metadata.RootElement, "status") ?? "allocated";
+        var runtimePath = Path.Combine(agentRoot, "runtime");
+        var workspacePath = Path.Combine(agentRoot, "workspace");
+        string? endpoint = null;
+        int? pid = null;
+        string? username = null;
+        string? password = null;
+
+        var serverPath = Path.Combine(runtimePath, "opencode-server.json");
+        if (File.Exists(serverPath))
+        {
+            using var server = JsonDocument.Parse(File.ReadAllText(serverPath));
+            if (!TerminalStatuses.Contains(status))
+            {
+                status = ReadString(server.RootElement, "status") ?? status;
+            }
+            endpoint = ReadString(server.RootElement, "endpoint");
+            if (server.RootElement.TryGetProperty("pid", out var pidElement)
+                && pidElement.ValueKind == JsonValueKind.Number)
+            {
+                pid = pidElement.GetInt32();
+            }
+            if (server.RootElement.TryGetProperty("auth", out var auth)
+                && auth.ValueKind == JsonValueKind.Object)
+            {
+                username = ReadString(auth, "username");
+                password = ReadString(auth, "password");
+            }
+        }
+
+        if (status.Equals("ready", StringComparison.OrdinalIgnoreCase)
+            && !string.IsNullOrWhiteSpace(endpoint))
+        {
+            status = await healthProbe.GetStatusAsync(endpoint, pid, username, password, cancellationToken);
+        }
+
+        var sessions = ReadManagedSessions(runtimePath, observedAt);
+        return new RunnerAgentInventoryItem(
+            AgentSessionId: sessions.FirstOrDefault()?.SessionId ?? agentId,
+            Status: status,
+            RuntimePath: runtimePath,
+            WorkspacePath: workspacePath,
+            OpenCodeEndpoint: endpoint,
+            OpenCodePid: pid,
+            ObservedAt: observedAt,
+            AgentId: agentId,
+            Sessions: sessions);
+    }
+
+    private static IReadOnlyList<RunnerAgentSessionInventoryItem> ReadManagedSessions(
+        string runtimePath,
+        DateTimeOffset observedAt)
+    {
+        var sessionsRoot = Path.Combine(runtimePath, "sessions");
+        if (!Directory.Exists(sessionsRoot))
+        {
+            return [];
+        }
+
+        return Directory.EnumerateDirectories(sessionsRoot)
+            .Select(path =>
+            {
+                var sessionId = Path.GetFileName(path);
+                var status = "allocated";
+                string? openCodeSessionId = null;
+                var metadataPath = Path.Combine(path, "session.json");
+                if (File.Exists(metadataPath))
+                {
+                    using var metadata = JsonDocument.Parse(File.ReadAllText(metadataPath));
+                    sessionId = ReadString(metadata.RootElement, "session_id") ?? sessionId;
+                    status = ReadString(metadata.RootElement, "status") ?? status;
+                    openCodeSessionId = ReadString(metadata.RootElement, "opencode_session_id");
+                }
+                return new RunnerAgentSessionInventoryItem(
+                    sessionId,
+                    status,
+                    path,
+                    openCodeSessionId,
+                    observedAt);
+            })
+            .OrderBy(session => session.SessionId, StringComparer.Ordinal)
             .ToArray();
     }
 

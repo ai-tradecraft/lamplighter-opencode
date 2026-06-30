@@ -39,11 +39,105 @@ public sealed class CliRunnerCommandHandler(
     {
         return command.Type switch
         {
+            RunnerCommandTypes.PrepareAgent => await PrepareAgentAsync(command, cancellationToken),
+            RunnerCommandTypes.StopAgent => await StopAgentAsync(command, cancellationToken),
+            RunnerCommandTypes.CreateAgentSession => await CreateSessionAsync(command, cancellationToken),
             RunnerCommandTypes.PrepareAgentSession => await PrepareSessionAsync(command, cancellationToken),
             RunnerCommandTypes.SubmitAgentTurn => await SubmitTurnAsync(command, cancellationToken),
             RunnerCommandTypes.CancelAgentSession => await CancelSessionAsync(command, cancellationToken),
             _ => RunnerCommandResult.Failed(new RunnerFailure($"Unsupported command type {command.Type}.", null, Retryable: false))
         };
+    }
+
+    private async Task<RunnerCommandResult> PrepareAgentAsync(
+        RunnerCommandEnvelope command,
+        CancellationToken cancellationToken)
+    {
+        var agentId = RequiredAgentId(command);
+        var specPath = await WriteCommandPayloadAsync(command, "agent-spec.json", cancellationToken);
+        var prepareOutput = await processRunner.RunAsync(
+            "uv",
+            [
+                "run", "lamplighter-opencode", "prepare-agent",
+                "--spec", specPath,
+                "--controller-workspace", _options.ControllerWorkspace,
+                "--json"
+            ],
+            cancellationToken);
+        if (prepareOutput.ExitCode != 0)
+        {
+            return await CompleteFromProcessAsync(
+                command,
+                prepareOutput,
+                RunnerEventTypes.AgentReady,
+                RunnerEventTypes.AgentFailed,
+                "application/vnd.tradecraft.prepare-agent-result+json",
+                cancellationToken);
+        }
+
+        var startOutput = await processRunner.RunAsync(
+            "uv",
+            [
+                "run", "lamplighter-opencode", "start-agent",
+                "--agent", agentId,
+                "--controller-workspace", _options.ControllerWorkspace,
+                "--json"
+            ],
+            cancellationToken);
+        return await CompleteFromProcessAsync(
+            command,
+            startOutput,
+            RunnerEventTypes.AgentReady,
+            RunnerEventTypes.AgentFailed,
+            "application/vnd.tradecraft.start-agent-result+json",
+            cancellationToken);
+    }
+
+    private async Task<RunnerCommandResult> CreateSessionAsync(
+        RunnerCommandEnvelope command,
+        CancellationToken cancellationToken)
+    {
+        var agentId = RequiredAgentId(command);
+        var specPath = await WriteCommandPayloadAsync(command, "session-spec.json", cancellationToken);
+        var output = await processRunner.RunAsync(
+            "uv",
+            [
+                "run", "lamplighter-opencode", "create-session",
+                "--agent", agentId,
+                "--spec", specPath,
+                "--controller-workspace", _options.ControllerWorkspace,
+                "--json"
+            ],
+            cancellationToken);
+        return await CompleteFromProcessAsync(
+            command,
+            output,
+            RunnerEventTypes.AgentSessionCreated,
+            RunnerEventTypes.AgentSessionFailed,
+            "application/vnd.tradecraft.create-session-result+json",
+            cancellationToken);
+    }
+
+    private async Task<RunnerCommandResult> StopAgentAsync(
+        RunnerCommandEnvelope command,
+        CancellationToken cancellationToken)
+    {
+        var output = await processRunner.RunAsync(
+            "uv",
+            [
+                "run", "lamplighter-opencode", "stop-agent",
+                "--agent", RequiredAgentId(command),
+                "--controller-workspace", _options.ControllerWorkspace,
+                "--json"
+            ],
+            cancellationToken);
+        return await CompleteFromProcessAsync(
+            command,
+            output,
+            RunnerEventTypes.AgentStopped,
+            RunnerEventTypes.AgentFailed,
+            "application/vnd.tradecraft.stop-agent-result+json",
+            cancellationToken);
     }
 
     private async Task<RunnerCommandResult> PrepareSessionAsync(
@@ -91,15 +185,29 @@ public sealed class CliRunnerCommandHandler(
         CancellationToken cancellationToken)
     {
         var payload = await DownloadPayloadAsync(command, cancellationToken);
-        var sessionRoot = SessionRoot(command.AgentSessionId);
+        var sessionId = command.SessionId ?? command.AgentSessionId;
+        var sessionRoot = command.AgentId is null
+            ? SessionRoot(sessionId)
+            : AgentSessionRoot(command.AgentId, sessionId);
         Directory.CreateDirectory(sessionRoot);
         var requestPath = Path.Combine(sessionRoot, $"{command.CorrelationId}.request.json");
         await File.WriteAllTextAsync(requestPath, payload, cancellationToken);
 
-        var output = await processRunner.RunAsync(
-            "uv",
-            ["run", "lamplighter-opencode", "submit-turn", "--session", command.AgentSessionId, "--request", requestPath, "--json"],
-            cancellationToken);
+        var arguments = new List<string>
+        {
+            "run", "lamplighter-opencode", "submit-turn",
+            "--session", sessionId,
+            "--request", requestPath
+        };
+        if (command.AgentId is not null)
+        {
+            arguments.AddRange([
+                "--agent", command.AgentId,
+                "--controller-workspace", _options.ControllerWorkspace
+            ]);
+        }
+        arguments.Add("--json");
+        var output = await processRunner.RunAsync("uv", [.. arguments], cancellationToken);
 
         return await CompleteTurnFromProcessAsync(command, output, cancellationToken);
     }
@@ -108,7 +216,28 @@ public sealed class CliRunnerCommandHandler(
         RunnerCommandEnvelope command,
         CancellationToken cancellationToken)
     {
-        logger.LogInformation("Received cancel command {CommandId} for session {SessionId}.", command.Id, command.AgentSessionId);
+        var sessionId = command.SessionId ?? command.AgentSessionId;
+        logger.LogInformation("Received cancel command {CommandId} for session {SessionId}.", command.Id, sessionId);
+        if (command.AgentId is not null)
+        {
+            var output = await processRunner.RunAsync(
+                "uv",
+                [
+                    "run", "lamplighter-opencode", "cancel-session",
+                    "--agent", command.AgentId,
+                    "--session", sessionId,
+                    "--controller-workspace", _options.ControllerWorkspace,
+                    "--json"
+                ],
+                cancellationToken);
+            return await CompleteFromProcessAsync(
+                command,
+                output,
+                "agent_session.cancelled",
+                RunnerEventTypes.AgentSessionFailed,
+                "application/vnd.tradecraft.cancel-session-result+json",
+                cancellationToken);
+        }
         var payloadRef = command.PayloadRef is null
             ? null
             : await apiClient.UploadContentAsync(
@@ -255,13 +384,56 @@ public sealed class CliRunnerCommandHandler(
                 PayloadRef: payloadRef,
                 CausationId: command.Id,
                 CorrelationId: command.CorrelationId,
-                CreatedAt: DateTimeOffset.UtcNow),
+                CreatedAt: DateTimeOffset.UtcNow,
+                AgentId: command.AgentId,
+                SessionId: command.SessionId),
             cancellationToken);
     }
 
     private string SessionRoot(string sessionId)
     {
         return Path.Combine(_options.ControllerWorkspace, "sessions", sessionId);
+    }
+
+    private string AgentSessionRoot(string agentId, string sessionId)
+    {
+        return Path.Combine(
+            _options.ControllerWorkspace,
+            "agents",
+            SafeIdentifier(agentId, "agent_"),
+            "runtime",
+            "sessions",
+            SafeIdentifier(sessionId, "session_"));
+    }
+
+    private async Task<string> WriteCommandPayloadAsync(
+        RunnerCommandEnvelope command,
+        string fileName,
+        CancellationToken cancellationToken)
+    {
+        var payload = await DownloadPayloadAsync(command, cancellationToken);
+        var commandRoot = Path.Combine(_options.ControllerWorkspace, "commands", SafeIdentifier(command.Id, "cmd_"));
+        Directory.CreateDirectory(commandRoot);
+        var path = Path.Combine(commandRoot, fileName);
+        await File.WriteAllTextAsync(path, payload, cancellationToken);
+        return path;
+    }
+
+    private static string RequiredAgentId(RunnerCommandEnvelope command)
+    {
+        return SafeIdentifier(
+            command.AgentId ?? throw new InvalidOperationException($"Command {command.Id} does not have agent_id."),
+            "agent_");
+    }
+
+    private static string SafeIdentifier(string value, string prefix)
+    {
+        if (!value.StartsWith(prefix, StringComparison.Ordinal)
+            || value.Any(character => !char.IsAsciiLetterOrDigit(character) && character is not '_' and not '-'))
+        {
+            throw new InvalidOperationException($"Unsafe identifier: {value}");
+        }
+        return value;
     }
 }
 

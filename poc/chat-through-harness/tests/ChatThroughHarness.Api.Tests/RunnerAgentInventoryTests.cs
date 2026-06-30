@@ -10,6 +10,56 @@ using Xunit;
 public sealed class RunnerAgentInventoryTests
 {
     [Fact]
+    public async Task ManagedAgentReportsMultipleChildSessions()
+    {
+        var root = NewRuntimeRoot();
+        var agentRoot = Path.Combine(root, "agents", "agent_1");
+        var runtimeRoot = Path.Combine(agentRoot, "runtime");
+        Directory.CreateDirectory(Path.Combine(agentRoot, "workspace"));
+        Directory.CreateDirectory(runtimeRoot);
+        File.WriteAllText(
+            Path.Combine(agentRoot, "agent.json"),
+            JsonSerializer.Serialize(new { agent_id = "agent_1", status = "ready" }));
+        File.WriteAllText(
+            Path.Combine(runtimeRoot, "opencode-server.json"),
+            JsonSerializer.Serialize(new
+            {
+                status = "ready",
+                endpoint = "http://127.0.0.1:4097",
+                pid = Environment.ProcessId,
+                auth = new { username = "opencode", password = "secret" }
+            }));
+        foreach (var sessionId in new[] { "session_1", "session_2" })
+        {
+            var sessionRoot = Path.Combine(runtimeRoot, "sessions", sessionId);
+            Directory.CreateDirectory(sessionRoot);
+            File.WriteAllText(
+                Path.Combine(sessionRoot, "session.json"),
+                JsonSerializer.Serialize(new
+                {
+                    session_id = sessionId,
+                    agent_id = "agent_1",
+                    status = "ready",
+                    opencode_session_id = $"opencode_{sessionId}"
+                }));
+        }
+
+        var agents = await RunnerAgentInventory.ScanAsync(
+            root,
+            DateTimeOffset.UtcNow,
+            new FakeHealthProbe("ready"),
+            CancellationToken.None);
+
+        var agent = Assert.Single(agents);
+        Assert.Equal("agent_1", agent.AgentId);
+        Assert.Equal(Path.Combine(agentRoot, "workspace"), agent.WorkspacePath);
+        Assert.Collection(
+            agent.Sessions!,
+            session => Assert.Equal("session_1", session.SessionId),
+            session => Assert.Equal("session_2", session.SessionId));
+    }
+
+    [Fact]
     public async Task ReadyAgentBecomesUnreachableWhenHealthProbeFails()
     {
         var root = NewRuntimeRoot();

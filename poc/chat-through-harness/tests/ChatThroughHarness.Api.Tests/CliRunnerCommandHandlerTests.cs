@@ -9,6 +9,55 @@ using Xunit;
 public sealed class CliRunnerCommandHandlerTests
 {
     [Fact]
+    public async Task PrepareAgentCommandUsesControllerWorkspaceAndPublishesReadyEvent()
+    {
+        var contentRef = new ClaimCheckContentRef("tradecraft://content/agent_1", "sha", "application/json", 2);
+        var api = new FakeRunnerApiClient("""{"agent_id":"agent_1"}""");
+        var process = new FakeHarnessProcessRunner(
+            new ProcessOutput("prepare-agent", 0, """{"status":"allocated"}""", ""),
+            new ProcessOutput("start-agent", 0, """{"status":"ready"}""", ""));
+        var controllerWorkspace = NewRuntimeRoot();
+        var handler = new CliRunnerCommandHandler(
+            api,
+            process,
+            Options.Create(new RunnerOptions { RunnerId = "runner_1", ControllerWorkspace = controllerWorkspace }),
+            NullLogger<CliRunnerCommandHandler>.Instance);
+        var command = new RunnerCommandEnvelope(
+            Id: "cmd_1",
+            RunnerId: "runner_1",
+            AgentSessionId: "agent_1",
+            Type: RunnerCommandTypes.PrepareAgent,
+            Status: RunnerCommandStatuses.Claimed,
+            PayloadRef: contentRef,
+            CorrelationId: "agent_1",
+            IdempotencyKey: "agent_1",
+            CreatedAt: DateTimeOffset.UnixEpoch,
+            AvailableAt: DateTimeOffset.UnixEpoch,
+            Lease: null,
+            AgentId: "agent_1");
+
+        var result = await handler.HandleAsync(command, CancellationToken.None);
+
+        Assert.Equal(RunnerCommandStatuses.Completed, result.Status);
+        Assert.Collection(
+            process.Invocations,
+            invocation =>
+            {
+                Assert.Contains("prepare-agent", invocation.Arguments);
+                Assert.Contains(controllerWorkspace, invocation.Arguments);
+            },
+            invocation =>
+            {
+                Assert.Contains("start-agent", invocation.Arguments);
+                Assert.Contains("agent_1", invocation.Arguments);
+                Assert.Contains(controllerWorkspace, invocation.Arguments);
+            });
+        var published = Assert.Single(api.PublishedEvents);
+        Assert.Equal(RunnerEventTypes.AgentReady, published.Type);
+        Assert.Equal("agent_1", published.AgentId);
+    }
+
+    [Fact]
     public async Task PrepareSessionCommandInvokesHarnessCliAndPublishesReadyEvent()
     {
         var contentRef = new ClaimCheckContentRef("tradecraft://content/spec_1", "sha", "application/json", 2);
