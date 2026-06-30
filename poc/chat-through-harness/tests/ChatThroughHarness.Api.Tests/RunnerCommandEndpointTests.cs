@@ -18,6 +18,72 @@ public sealed class RunnerCommandEndpointTests : IClassFixture<WebApplicationFac
     }
 
     [Fact]
+    public async Task ControllerAgentOwnsMultipleSessions()
+    {
+        using var client = _factory.CreateClient();
+        var runnerId = Ids.New("runner");
+        await PostHeartbeatAsync(client, runnerId);
+
+        var agentResponse = await client.PostAsJsonAsync(
+            $"/api/agent-controllers/{runnerId}/agents",
+            new CreateAgentRequest());
+        agentResponse.EnsureSuccessStatusCode();
+        var agent = await agentResponse.Content.ReadFromJsonAsync<AgentRecord>(JsonDefaults.Options);
+        Assert.NotNull(agent);
+        Assert.StartsWith("agent_", agent.Id);
+
+        var commands = await PollCommandsAsync(client, runnerId);
+        var prepareAgent = Assert.Single(commands, command =>
+            command.AgentId == agent.Id
+            && command.Type == RunnerCommandTypes.PrepareAgent);
+        Assert.Null(prepareAgent.SessionId);
+
+        var readyEvent = new RunnerEventEnvelope(
+            Id: Ids.New("event"),
+            RunnerId: runnerId,
+            AgentSessionId: agent.Id,
+            CommandId: prepareAgent.Id,
+            Type: RunnerEventTypes.AgentReady,
+            PayloadRef: null,
+            CausationId: prepareAgent.Id,
+            CorrelationId: agent.Id,
+            CreatedAt: DateTimeOffset.UtcNow,
+            AgentId: agent.Id);
+        (await client.PostAsJsonAsync(
+            "/api/runner/events",
+            readyEvent,
+            RunnerProtocolJson.Options)).EnsureSuccessStatusCode();
+
+        var sessions = new List<AgentSessionRecord>();
+        for (var index = 0; index < 2; index++)
+        {
+            var response = await client.PostAsJsonAsync(
+                $"/api/agents/{agent.Id}/sessions",
+                new CreateAgentSessionRequest(Goal: $"chat {index}"));
+            response.EnsureSuccessStatusCode();
+            sessions.Add((await response.Content.ReadFromJsonAsync<AgentSessionRecord>(JsonDefaults.Options))!);
+        }
+
+        Assert.All(sessions, session => Assert.Equal(agent.Id, session.AgentId));
+        Assert.NotEqual(sessions[0].Id, sessions[1].Id);
+        var listed = await client.GetFromJsonAsync<IReadOnlyCollection<AgentSessionRecord>>(
+            $"/api/agents/{agent.Id}/sessions",
+            JsonDefaults.Options);
+        Assert.NotNull(listed);
+        Assert.Equal(2, listed.Count);
+
+        commands = await PollCommandsAsync(client, runnerId);
+        Assert.Contains(commands, command =>
+            command.AgentId == agent.Id
+            && command.SessionId == sessions[0].Id
+            && command.Type == RunnerCommandTypes.CreateAgentSession);
+        Assert.Contains(commands, command =>
+            command.AgentId == agent.Id
+            && command.SessionId == sessions[1].Id
+            && command.Type == RunnerCommandTypes.CreateAgentSession);
+    }
+
+    [Fact]
     public async Task BrowserLogsAreWrittenToCentralJsonLinesFile()
     {
         using var client = _factory.CreateClient();
