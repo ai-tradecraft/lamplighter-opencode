@@ -16,14 +16,16 @@ import {
 } from "lucide-react";
 import "./styles.css";
 
-type AgentController = {
-  runnerId: string;
+type SessionSummary = {
+  sessionId: string;
   status: string;
+  runtimePath: string;
+  openCodeSessionId?: string;
   observedAt: string;
-  agents: ControllerAgent[];
 };
 
 type ControllerAgent = {
+  agentId?: string;
   agentSessionId: string;
   status: string;
   runtimePath: string;
@@ -31,10 +33,34 @@ type ControllerAgent = {
   openCodeEndpoint?: string;
   openCodePid?: number;
   observedAt: string;
+  sessions?: SessionSummary[];
+};
+
+type AgentController = {
+  runnerId: string;
+  status: string;
+  observedAt: string;
+  agents: ControllerAgent[];
+};
+
+type Agent = {
+  id: string;
+  controllerId: string;
+  status: string;
+  createdAt: string;
+  readyAt?: string;
+  endedAt?: string;
+  runtimePath: string;
+  workspacePath: string;
+  backendKind: string;
+  branchName: string;
+  openCodeEndpoint?: string;
+  openCodePid?: number;
 };
 
 type Session = {
   id: string;
+  agentId?: string;
   controllerId?: string;
   status: string;
   createdAt?: string;
@@ -75,13 +101,40 @@ type Diagnostics = {
   logPath: string;
 };
 
-type PortalView = "controllers" | "controller" | "agent" | "session";
+type Route =
+  | { kind: "controllers" }
+  | { kind: "controller"; controllerId: string }
+  | { kind: "agent"; agentId: string }
+  | { kind: "session"; agentId: string; sessionId: string };
 
 const api = import.meta.env.VITE_API_BASE_URL ?? "";
-const hiddenAgentStatuses = new Set(["stopped", "cancelled"]);
+const hiddenAgentStatuses = new Set(["stopped", "cancelled", "failed"]);
+const hiddenSessionStatuses = new Set(["cancelled", "failed"]);
+
+function agentIdentifier(agent: ControllerAgent) {
+  return agent.agentId ?? agent.agentSessionId;
+}
 
 function isActiveAgent(agent: ControllerAgent) {
   return !hiddenAgentStatuses.has(agent.status.toLowerCase());
+}
+
+function isActiveSession(session: Session) {
+  return !hiddenSessionStatuses.has(session.status.toLowerCase());
+}
+
+function parseRoute(pathname: string): Route {
+  const parts = pathname.split("/").filter(Boolean).map(decodeURIComponent);
+  if (parts[0] === "controllers" && parts.length === 2) {
+    return { kind: "controller", controllerId: parts[1] };
+  }
+  if (parts[0] === "agents" && parts.length === 2) {
+    return { kind: "agent", agentId: parts[1] };
+  }
+  if (parts[0] === "agents" && parts[2] === "sessions" && parts.length === 4) {
+    return { kind: "session", agentId: parts[1], sessionId: parts[3] };
+  }
+  return { kind: "controllers" };
 }
 
 type ClientLogLevel = "debug" | "information" | "warning" | "error";
@@ -94,12 +147,7 @@ function reportClientLog(level: ClientLogLevel, message: string, context?: Clien
   void fetch(`${api}/api/client-logs`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      level,
-      message,
-      timestamp: new Date().toISOString(),
-      context: normalizedContext
-    })
+    body: JSON.stringify({ level, message, timestamp: new Date().toISOString(), context: normalizedContext })
   }).catch(() => undefined);
 }
 
@@ -116,11 +164,7 @@ async function apiFetch(path: string, init?: RequestInit) {
     }
     return response;
   } catch (error) {
-    reportClientLog("error", "API request failed.", {
-      method,
-      path,
-      error: String(error)
-    });
+    reportClientLog("error", "API request failed.", { method, path, error: String(error) });
     throw error;
   }
 }
@@ -134,160 +178,213 @@ window.addEventListener("error", (event) => {
   });
 });
 window.addEventListener("unhandledrejection", (event) => {
-  reportClientLog("error", "Unhandled browser promise rejection.", {
-    reason: String(event.reason)
-  });
+  reportClientLog("error", "Unhandled browser promise rejection.", { reason: String(event.reason) });
 });
-reportClientLog("information", "Portal client initialized.", {
-  path: window.location.pathname
-});
+reportClientLog("information", "Portal client initialized.", { path: window.location.pathname });
 
 function App() {
+  const [route, setRoute] = useState<Route>(() => parseRoute(window.location.pathname));
   const [controllers, setControllers] = useState<AgentController[]>([]);
-  const [selectedControllerId, setSelectedControllerId] = useState<string | null>(null);
-  const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
-  const [view, setView] = useState<PortalView>("controllers");
+  const [agent, setAgent] = useState<Agent | null>(null);
+  const [sessions, setSessions] = useState<Session[]>([]);
   const [session, setSession] = useState<Session | null>(null);
   const [turns, setTurns] = useState<Turn[]>([]);
   const [events, setEvents] = useState<RuntimeEvent[]>([]);
   const [prompt, setPrompt] = useState("");
   const [showAllAgents, setShowAllAgents] = useState(false);
+  const [showAllSessions, setShowAllSessions] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const selectedController = useMemo(() => {
+    const controllerId = route.kind === "controller"
+      ? route.controllerId
+      : agent?.controllerId ?? session?.controllerId;
+    return controllers.find((controller) => controller.runnerId === controllerId) ?? null;
+  }, [agent?.controllerId, controllers, route, session?.controllerId]);
+  const visibleAgents = useMemo(() => {
+    return selectedController?.agents.filter((item) => showAllAgents || isActiveAgent(item)) ?? [];
+  }, [selectedController, showAllAgents]);
+  const visibleSessions = useMemo(() => {
+    return sessions.filter((item) => showAllSessions || isActiveSession(item));
+  }, [sessions, showAllSessions]);
   const latestDiagnostics = useMemo(() => {
     const turn = [...turns].reverse().find((item) => item.diagnostics || item.failureDetail);
     if (turn?.diagnostics) {
       return turn.diagnostics;
     }
     if (turn?.failureDetail) {
-      return {
-        summary: turn.failureSummary ?? "Agent turn failed.",
-        detail: turn.failureDetail
-      };
+      return { summary: turn.failureSummary ?? "Agent turn failed.", detail: turn.failureDetail };
     }
     return session?.diagnostics;
   }, [session, turns]);
-  const selectedController = useMemo(() => {
-    return controllers.find((controller) => controller.runnerId === selectedControllerId) ?? null;
-  }, [controllers, selectedControllerId]);
-  const selectedAgent = useMemo(() => {
-    return selectedController?.agents.find((agent) => agent.agentSessionId === selectedAgentId) ?? null;
-  }, [selectedAgentId, selectedController]);
-  const visibleAgents = useMemo(() => {
-    return selectedController?.agents.filter((agent) => showAllAgents || isActiveAgent(agent)) ?? [];
-  }, [selectedController, showAllAgents]);
   const chatPlaceholder = busy
     ? "Loading agent session..."
     : !session
-      ? "Select a ready agent to chat"
+      ? "Select a session to chat"
       : session.status !== "ready"
-        ? `Agent is ${session.status}; chat is unavailable`
+        ? `Session is ${session.status}; chat is unavailable`
         : "Send a prompt to the harnessed agent";
 
+  function navigate(path: string, replace = false) {
+    if (replace) {
+      window.history.replaceState(null, "", path);
+    } else {
+      window.history.pushState(null, "", path);
+    }
+    setRoute(parseRoute(path));
+    setError(null);
+  }
+
   useEffect(() => {
-    refreshControllers();
-    const interval = window.setInterval(refreshControllers, 5000);
+    if (window.location.pathname === "/") {
+      navigate("/controllers", true);
+    }
+    const handlePopState = () => setRoute(parseRoute(window.location.pathname));
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+
+  useEffect(() => {
+    void refreshControllers();
+    const interval = window.setInterval(() => void refreshControllers(), 5000);
     return () => window.clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    if (route.kind === "agent" || route.kind === "session") {
+      void loadAgent(route.agentId);
+      const interval = window.setInterval(() => void loadAgent(route.agentId), 5000);
+      return () => window.clearInterval(interval);
+    }
+    setAgent(null);
+    setSessions([]);
+  }, [route.kind === "agent" ? route.agentId : route.kind === "session" ? route.agentId : null]);
+
+  useEffect(() => {
+    if (route.kind === "session") {
+      void openChatSession(route.sessionId);
+    } else {
+      setSession(null);
+      setTurns([]);
+      setEvents([]);
+    }
+  }, [route.kind === "session" ? route.sessionId : null]);
 
   useEffect(() => {
     if (!session) {
       return;
     }
-
     const connection = new HubConnectionBuilder().withUrl(`${api}/hubs/agent-sessions`).withAutomaticReconnect().build();
-    const handleEvent = (event: RuntimeEvent) => {
-      setEvents((current) => [...current.filter((item) => item.id !== event.id), event]);
-      if (event.type.startsWith("agent_turn.")) {
-        refreshTurn(session.id, event.turnId);
+    const handleEvent = (runtimeEvent: RuntimeEvent) => {
+      setEvents((current) => [...current.filter((item) => item.id !== runtimeEvent.id), runtimeEvent]);
+      if (runtimeEvent.type.startsWith("agent_turn.")) {
+        void refreshTurn(session.id, runtimeEvent.turnId);
       }
-      if (event.type.startsWith("agent_session.")) {
-        refreshSession(session.id).catch((err) => setError(String(err)));
-        refreshControllers();
+      if (runtimeEvent.type.startsWith("agent_session.")) {
+        void refreshSession(session.id);
+        if (session.agentId) {
+          void loadAgent(session.agentId);
+        }
       }
     };
-
     [
       "agent_session.preparing",
       "agent_session.ready",
+      "agent_session.created",
       "agent_session.failed",
       "agent_session.cancelled",
       "agent_turn.submitted",
       "agent_turn.completed",
       "agent_turn.failed"
     ].forEach((name) => connection.on(name, handleEvent));
-
     connection
       .start()
       .then(() => connection.invoke("JoinSession", session.id))
-      .catch((err) => {
-        reportClientLog("error", "SignalR session connection failed.", {
-          sessionId: session.id,
-          error: String(err)
-        });
-        setError(String(err));
-      });
+      .catch((err) => setError(String(err)));
     return () => {
-      connection.stop().catch(() => undefined);
+      void connection.stop();
     };
   }, [session?.id]);
 
   async function refreshControllers() {
-    let response: Response;
     try {
-      response = await apiFetch("/api/agent-controllers");
+      const response = await apiFetch("/api/agent-controllers");
+      if (response.ok) {
+        setControllers((await response.json()) as AgentController[]);
+      }
     } catch {
       return;
     }
-    if (!response.ok) {
-      return;
-    }
-    const nextControllers = (await response.json()) as AgentController[];
-    setControllers(nextControllers);
-    setSelectedControllerId((current) => {
-      return current && nextControllers.some((controller) => controller.runnerId === current) ? current : null;
-    });
   }
 
-  function openController(controller: AgentController) {
-    setSelectedControllerId(controller.runnerId);
-    setSelectedAgentId(null);
-    setSession(null);
-    setTurns([]);
-    setEvents([]);
-    setError(null);
-    setView("controller");
+  async function loadAgent(agentId: string) {
+    try {
+      const [agentResponse, sessionsResponse] = await Promise.all([
+        apiFetch(`/api/agents/${agentId}`),
+        apiFetch(`/api/agents/${agentId}/sessions`)
+      ]);
+      if (!agentResponse.ok) {
+        throw new Error(`Agent ${agentId} is no longer available.`);
+      }
+      setAgent((await agentResponse.json()) as Agent);
+      if (sessionsResponse.ok) {
+        setSessions((await sessionsResponse.json()) as Session[]);
+      }
+    } catch (err) {
+      setError(String(err));
+    }
   }
 
-  async function startSession() {
-    if (!selectedControllerId) {
-      setError("No active local controller is available.");
+  async function createAgent() {
+    if (route.kind !== "controller") {
       return;
     }
-
     setBusy(true);
     setError(null);
     try {
-      const response = await apiFetch("/api/agent-sessions", {
+      const response = await apiFetch(`/api/agent-controllers/${route.controllerId}/agents`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ goal: "Chat through harness POC", controllerId: selectedControllerId })
+        body: JSON.stringify({})
+      });
+      if (!response.ok) {
+        throw new Error(await response.text());
+      }
+      const created = (await response.json()) as Agent;
+      reportClientLog("information", "Agent creation accepted.", {
+        agentId: created.id,
+        controllerId: route.controllerId
+      });
+      navigate(`/agents/${encodeURIComponent(created.id)}`);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function createSession() {
+    if (!agent) {
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const response = await apiFetch(`/api/agents/${agent.id}/sessions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ goal: "Chat through harness POC" })
       });
       if (!response.ok) {
         throw new Error(await response.text());
       }
       const created = (await response.json()) as Session;
+      setSessions((current) => [created, ...current.filter((item) => item.id !== created.id)]);
       reportClientLog("information", "Agent session creation accepted.", {
-        sessionId: created.id,
-        controllerId: selectedControllerId
+        agentId: agent.id,
+        sessionId: created.id
       });
-      setSession(created);
-      setSelectedAgentId(created.id);
-      setTurns([]);
-      await refreshEvents(created.id);
-      await refreshControllers();
-      setView("agent");
     } catch (err) {
       setError(String(err));
     } finally {
@@ -295,22 +392,15 @@ function App() {
     }
   }
 
-  async function openAgent(agent: ControllerAgent) {
-    setBusy(true);
-    setError(null);
-    setSelectedAgentId(agent.agentSessionId);
-    setTurns([]);
-    setEvents([]);
-    try {
-      await refreshSession(agent.agentSessionId);
-      reportClientLog("information", "Agent details opened.", {
-        sessionId: agent.agentSessionId
-      });
-      setView("agent");
-    } catch (err) {
-      setError(String(err));
-    } finally {
-      setBusy(false);
+  async function stopAgent() {
+    if (!agent) {
+      return;
+    }
+    const response = await apiFetch(`/api/agents/${agent.id}/stop`, { method: "POST" });
+    if (response.ok) {
+      setAgent((await response.json()) as Agent);
+    } else {
+      setError(await response.text());
     }
   }
 
@@ -318,10 +408,8 @@ function App() {
     setBusy(true);
     setError(null);
     try {
-      await refreshSession(sessionId);
-      await Promise.all([refreshTurns(sessionId), refreshEvents(sessionId)]);
+      await Promise.all([refreshSession(sessionId), refreshTurns(sessionId), refreshEvents(sessionId)]);
       reportClientLog("information", "Agent chat session opened.", { sessionId });
-      setView("session");
     } catch (err) {
       setError(String(err));
     } finally {
@@ -334,7 +422,6 @@ function App() {
     if (!session || !prompt.trim()) {
       return;
     }
-
     const currentPrompt = prompt.trim();
     setPrompt("");
     setBusy(true);
@@ -349,10 +436,6 @@ function App() {
         throw new Error(await response.text());
       }
       const turn = (await response.json()) as Turn;
-      reportClientLog("information", "Agent turn submitted.", {
-        sessionId: session.id,
-        turnId: turn.id
-      });
       setTurns((current) => [...current.filter((item) => item.id !== turn.id), turn]);
       await refreshEvents(session.id);
     } catch (err) {
@@ -366,12 +449,16 @@ function App() {
     if (!session) {
       return;
     }
-    await apiFetch(`/api/agent-sessions/${session.id}/cancel`, {
+    const response = await apiFetch(`/api/agent-sessions/${session.id}/cancel`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ reason: "Cancelled from UI." })
     });
-    await refreshSession(session.id);
+    if (response.ok) {
+      await refreshSession(session.id);
+    } else {
+      setError(await response.text());
+    }
   }
 
   async function refreshSession(sessionId: string) {
@@ -407,20 +494,21 @@ function App() {
     }
   }
 
-  if (view === "controllers") {
+  if (route.kind === "controllers") {
     return (
       <main className="portal-page">
         <header className="page-heading">
-          <div>
-            <p className="eyebrow">Lamplighter</p>
-            <h1>Controllers</h1>
-          </div>
+          <div><p className="eyebrow">Lamplighter</p><h1>Controllers</h1></div>
           <span className="summary-count">{controllers.length} active</span>
         </header>
         <section className="resource-list" aria-label="Active controllers">
           {controllers.length === 0 ? <div className="empty-state">No controllers online.</div> : null}
           {controllers.map((controller) => (
-            <button className="resource-row" key={controller.runnerId} onClick={() => openController(controller)}>
+            <button
+              className="resource-row"
+              key={controller.runnerId}
+              onClick={() => navigate(`/controllers/${encodeURIComponent(controller.runnerId)}`)}
+            >
               <span className="resource-icon"><Server size={20} /></span>
               <span className="resource-primary">
                 <strong>{controller.runnerId}</strong>
@@ -436,18 +524,14 @@ function App() {
     );
   }
 
-  if (view === "controller" && selectedController) {
+  if (route.kind === "controller" && selectedController) {
     return (
       <main className="portal-page">
-        <button className="back-button" onClick={() => setView("controllers")} title="Back to controllers">
-          <ArrowLeft size={18} />
-          Controllers
+        <button className="back-button" onClick={() => navigate("/controllers")} title="Back to controllers">
+          <ArrowLeft size={18} /> Controllers
         </button>
         <header className="detail-heading">
-          <div>
-            <p className="eyebrow">Controller</p>
-            <h1>{selectedController.runnerId}</h1>
-          </div>
+          <div><p className="eyebrow">Controller</p><h1>{selectedController.runnerId}</h1></div>
           <span className="status-value prominent" data-status={selectedController.status}>{selectedController.status}</span>
         </header>
         <section className="detail-band">
@@ -455,34 +539,93 @@ function App() {
           <div><Activity size={17} /><span>Active agents</span><strong>{selectedController.agents.filter(isActiveAgent).length}</strong></div>
         </section>
         <section className="section-heading">
-          <div>
-            <h2>Agents</h2>
-            <p>Provisioned on this controller</p>
-          </div>
+          <div><h2>Agents</h2><p>Provisioned on this controller</p></div>
           <div className="section-actions">
             <label className="show-all-toggle">
               <input type="checkbox" checked={showAllAgents} onChange={(event) => setShowAllAgents(event.target.checked)} />
               Show all
             </label>
-            <button onClick={startSession} disabled={busy}>
-              <Play size={16} />
-              New Agent
-            </button>
+            <button onClick={createAgent} disabled={busy}><Play size={16} /> New Agent</button>
           </div>
         </section>
         <section className="resource-list" aria-label="Controller agents">
           {selectedController.agents.length === 0 ? <div className="empty-state">No agents allocated.</div> : null}
-          {selectedController.agents.length > 0 && visibleAgents.length === 0 ? (
-            <div className="empty-state">No active agents.</div>
-          ) : null}
-          {visibleAgents.map((agent) => (
-            <button className="resource-row" key={agent.agentSessionId} onClick={() => openAgent(agent)}>
-              <span className="resource-icon"><Bot size={20} /></span>
+          {selectedController.agents.length > 0 && visibleAgents.length === 0 ? <div className="empty-state">No active agents.</div> : null}
+          {visibleAgents.map((item) => {
+            const id = agentIdentifier(item);
+            return (
+              <button className="resource-row" key={id} onClick={() => navigate(`/agents/${encodeURIComponent(id)}`)}>
+                <span className="resource-icon"><Bot size={20} /></span>
+                <span className="resource-primary">
+                  <strong title={id}>{id}</strong>
+                  <small>{item.sessions?.length ?? 0} sessions · observed {new Date(item.observedAt).toLocaleString()}</small>
+                </span>
+                <span className="status-value" data-status={item.status}>{item.status}</span>
+                <ChevronRight size={18} />
+              </button>
+            );
+          })}
+        </section>
+        {error ? <div className="page-error">{error}</div> : null}
+      </main>
+    );
+  }
+
+  if (route.kind === "agent" && agent) {
+    return (
+      <main className="portal-page">
+        <button
+          className="back-button"
+          onClick={() => navigate(`/controllers/${encodeURIComponent(agent.controllerId)}`)}
+          title="Back to controller"
+        >
+          <ArrowLeft size={18} /> {agent.controllerId}
+        </button>
+        <header className="detail-heading">
+          <div><p className="eyebrow">Agent</p><h1 title={agent.id}>{agent.id}</h1></div>
+          <span className="status-value prominent" data-status={agent.status}>{agent.status}</span>
+        </header>
+        <section className="agent-details">
+          <dl>
+            <dt>Controller</dt><dd>{agent.controllerId}</dd>
+            <dt>Backend</dt><dd>{agent.backendKind}</dd>
+            <dt>Branch</dt><dd>{agent.branchName}</dd>
+            <dt>OpenCode</dt><dd>{agent.openCodeEndpoint || "Not available"}</dd>
+            <dt>Process</dt><dd>{agent.openCodePid ?? "Not available"}</dd>
+            <dt>Workspace</dt><dd title={agent.workspacePath}>{agent.workspacePath || "Pending allocation"}</dd>
+            <dt>Runtime</dt><dd title={agent.runtimePath}>{agent.runtimePath || "Pending allocation"}</dd>
+          </dl>
+          <button className="secondary-button" onClick={stopAgent} disabled={agent.status === "stopped"}>
+            <CircleStop size={16} /> Stop Agent
+          </button>
+        </section>
+        <section className="section-heading">
+          <div><h2>Sessions</h2><p>Conversations available for this agent</p></div>
+          <div className="section-actions">
+            <label className="show-all-toggle">
+              <input type="checkbox" checked={showAllSessions} onChange={(event) => setShowAllSessions(event.target.checked)} />
+              Show all
+            </label>
+            <button onClick={createSession} disabled={busy || agent.status !== "ready"}>
+              <MessageSquare size={16} /> New Session
+            </button>
+          </div>
+        </section>
+        <section className="resource-list" aria-label="Agent sessions">
+          {sessions.length === 0 ? <div className="empty-state">No sessions created.</div> : null}
+          {sessions.length > 0 && visibleSessions.length === 0 ? <div className="empty-state">No active sessions.</div> : null}
+          {visibleSessions.map((item) => (
+            <button
+              className="resource-row"
+              key={item.id}
+              onClick={() => navigate(`/agents/${encodeURIComponent(agent.id)}/sessions/${encodeURIComponent(item.id)}`)}
+            >
+              <span className="resource-icon"><MessageSquare size={20} /></span>
               <span className="resource-primary">
-                <strong title={agent.agentSessionId}>{agent.agentSessionId}</strong>
-                <small>Observed {new Date(agent.observedAt).toLocaleString()}</small>
+                <strong title={item.id}>{item.id}</strong>
+                <small>{item.createdAt ? `Created ${new Date(item.createdAt).toLocaleString()}` : "Current conversation"}</small>
               </span>
-              <span className="status-value" data-status={agent.status}>{agent.status}</span>
+              <span className="status-value" data-status={item.status}>{item.status}</span>
               <ChevronRight size={18} />
             </button>
           ))}
@@ -492,70 +635,31 @@ function App() {
     );
   }
 
-  if (view === "agent" && selectedController && session) {
-    return (
-      <main className="portal-page">
-        <button className="back-button" onClick={() => setView("controller")} title="Back to controller">
-          <ArrowLeft size={18} />
-          {selectedController.runnerId}
-        </button>
-        <header className="detail-heading">
-          <div>
-            <p className="eyebrow">Agent</p>
-            <h1 title={session.id}>{session.id}</h1>
-          </div>
-          <span className="status-value prominent" data-status={session.status}>{session.status}</span>
-        </header>
-        <section className="agent-details">
-          <dl>
-            <dt>Controller</dt><dd>{selectedController.runnerId}</dd>
-            <dt>Backend</dt><dd>{session.backendKind}</dd>
-            <dt>Branch</dt><dd>{session.branchName}</dd>
-            <dt>OpenCode</dt><dd>{selectedAgent?.openCodeEndpoint ?? "Not available"}</dd>
-            <dt>Process</dt><dd>{selectedAgent?.openCodePid ?? "Not available"}</dd>
-            <dt>Workspace</dt><dd title={session.workspacePath}>{session.workspacePath}</dd>
-            <dt>Runtime</dt><dd title={session.runtimePath}>{session.runtimePath}</dd>
-          </dl>
-          <button className="secondary-button" onClick={cancelSession} disabled={session.status === "cancelled"}>
-            <CircleStop size={16} />
-            Cancel Agent
-          </button>
-        </section>
-        <section className="section-heading">
-          <div>
-            <h2>Sessions</h2>
-            <p>Conversations available for this agent</p>
-          </div>
-        </section>
-        <section className="resource-list" aria-label="Agent sessions">
-          <button className="resource-row" onClick={() => openChatSession(session.id)} disabled={busy}>
-            <span className="resource-icon"><MessageSquare size={20} /></span>
-            <span className="resource-primary">
-              <strong title={session.id}>{session.id}</strong>
-              <small>{session.createdAt ? `Created ${new Date(session.createdAt).toLocaleString()}` : "Current conversation"}</small>
-            </span>
-            <span className="status-value" data-status={session.status}>{session.status}</span>
-            <ChevronRight size={18} />
-          </button>
-        </section>
-        {error ? <div className="page-error">{error}</div> : null}
-      </main>
-    );
-  }
-
-  if (view === "session" && selectedController && session) {
+  if (route.kind === "session" && session) {
     return (
       <main className="session-page">
         <header className="session-header">
-          <button className="icon-button" onClick={() => setView("agent")} title="Back to agent">
+          <button
+            className="icon-button"
+            onClick={() => navigate(`/agents/${encodeURIComponent(route.agentId)}`)}
+            title="Back to agent"
+          >
             <ArrowLeft size={19} />
           </button>
           <div className="session-identity">
-            <span>{selectedController.runnerId}</span>
-            <ChevronRight size={14} />
-            <span>{session.id}</span>
+            <span>{route.agentId}</span><ChevronRight size={14} /><span>{session.id}</span>
           </div>
-          <span className="status-value" data-status={session.status}>{session.status}</span>
+          <div className="header-actions">
+            <span className="status-value" data-status={session.status}>{session.status}</span>
+            <button
+              className="icon-button danger"
+              onClick={cancelSession}
+              disabled={session.status === "cancelled"}
+              title="Cancel session"
+            >
+              <CircleStop size={18} />
+            </button>
+          </div>
         </header>
         <div className="session-workspace">
           <section className="chat">
@@ -573,24 +677,21 @@ function App() {
                 value={prompt}
                 onChange={(event) => setPrompt(event.target.value)}
                 placeholder={chatPlaceholder}
-                disabled={!session || session.status !== "ready" || busy}
+                disabled={session.status !== "ready" || busy}
               />
-              <button disabled={!session || session.status !== "ready" || busy || !prompt.trim()} title="Send prompt">
+              <button disabled={session.status !== "ready" || busy || !prompt.trim()} title="Send prompt">
                 <Send size={16} />
               </button>
             </form>
             {error ? <div className="error">{error}</div> : null}
           </section>
           <aside className="panel event-rail">
-            <div className="panel-title">
-              <Terminal size={18} />
-              Runtime Events
-            </div>
+            <div className="panel-title"><Terminal size={18} /> Runtime Events</div>
             {events.length === 0 ? <div className="empty-list">No runtime events yet.</div> : null}
-            {events.map((event) => (
-              <div className="event" key={event.id}>
-                <strong>{event.type}</strong>
-                <span>{new Date(event.createdAt).toLocaleTimeString()}</span>
+            {events.map((runtimeEvent) => (
+              <div className="event" key={runtimeEvent.id}>
+                <strong>{runtimeEvent.type}</strong>
+                <span>{new Date(runtimeEvent.createdAt).toLocaleTimeString()}</span>
               </div>
             ))}
           </aside>
@@ -605,11 +706,10 @@ function App() {
 
   return (
     <main className="portal-page">
-      <button className="back-button" onClick={() => setView("controllers")}>
-        <ArrowLeft size={18} />
-        Controllers
+      <button className="back-button" onClick={() => navigate("/controllers")}>
+        <ArrowLeft size={18} /> Controllers
       </button>
-      <div className="empty-state">The selected resource is no longer available.</div>
+      <div className="empty-state">{error ?? "Loading selected resource..."}</div>
     </main>
   );
 }
