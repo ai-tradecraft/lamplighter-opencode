@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tradecraft.local/schemas/lamplighter/agent_chat_history.schema.json",
+  "title": "AgentChatHistory",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "agent_id",
+    "agent_session_id",
+    "opencode_session_id",
+    "observed_at",
+    "messages",
+    "raw_messages"
+  ],
+  "properties": {
+    "agent_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "agent_session_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "opencode_session_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "observed_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "messages": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source_message_id", "role", "text", "created_at", "completed_at"],
+        "properties": {
+          "source_message_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "role": {
+            "enum": ["user", "assistant"]
+          },
+          "text": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "completed_at": {
+            "type": ["string", "null"],
+            "format": "date-time"
+          }
+        }
+      }
+    },
+    "raw_messages": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    }
+  }
+}

@@ -22,6 +22,8 @@ from typing import Any
 from urllib.parse import quote, urlencode, urlparse, urlunparse
 
 from lamplighter_opencode.contracts.models import (
+    AgentChatHistory,
+    AgentChatMessage,
     AgentChatSessionSpec,
     AgentSessionSpec,
     AgentSpec,
@@ -181,6 +183,43 @@ def submit_agent_session_turn(
         ended_at=datetime.now(UTC).isoformat(),
         message=_extract_text_response(prompt),
         commands_observed=[f"POST /session/{opencode_session_id}/message"],
+    )
+
+
+def get_agent_session_history(
+    controller_workspace: Path,
+    agent_id: str,
+    session_id: str,
+) -> AgentChatHistory:
+    """Read and normalize the authoritative message history from OpenCode."""
+    agent = agent_layout(controller_workspace, agent_id)
+    session = agent_session_layout(controller_workspace, agent_id, session_id)
+    server = _read_json(agent.server_metadata_path)
+    session_metadata = _read_json(session.metadata_path)
+    if _metadata_string(server, "status") != "ready":
+        raise OpenCodeServerError(f"OpenCode server is not ready for {agent_id}")
+
+    opencode_session_id = _metadata_string(session_metadata, "opencode_session_id")
+    raw_messages = _request_json_array(
+        server,
+        "GET",
+        f"/session/{quote(opencode_session_id, safe='')}/message",
+        query={"directory": str(agent.workspace_dir)},
+    )
+    messages = [
+        normalized
+        for raw_message in raw_messages
+        if isinstance(raw_message, dict)
+        for normalized in [_normalize_opencode_message(raw_message)]
+        if normalized is not None
+    ]
+    return AgentChatHistory(
+        agent_id=agent_id,
+        agent_session_id=session_id,
+        opencode_session_id=opencode_session_id,
+        observed_at=datetime.now(UTC).isoformat(),
+        messages=messages,
+        raw_messages=[message for message in raw_messages if isinstance(message, dict)],
     )
 
 
@@ -885,6 +924,36 @@ def _request_json(
     body: object | None = None,
     timeout: float = 60,
 ) -> dict[str, Any]:
+    value = _request_json_value(metadata, method, path, query=query, body=body, timeout=timeout)
+    if not isinstance(value, dict):
+        raise OpenCodeServerError(f"{method} {path} returned a non-object JSON response.")
+    return value
+
+
+def _request_json_array(
+    metadata: dict[str, Any],
+    method: str,
+    path: str,
+    *,
+    query: dict[str, str] | None = None,
+    body: object | None = None,
+    timeout: float = 60,
+) -> list[Any]:
+    value = _request_json_value(metadata, method, path, query=query, body=body, timeout=timeout)
+    if not isinstance(value, list):
+        raise OpenCodeServerError(f"{method} {path} returned a non-array JSON response.")
+    return value
+
+
+def _request_json_value(
+    metadata: dict[str, Any],
+    method: str,
+    path: str,
+    *,
+    query: dict[str, str] | None = None,
+    body: object | None = None,
+    timeout: float = 60,
+) -> Any:
     endpoint = _metadata_string(metadata, "endpoint").rstrip("/")
     url = f"{endpoint}{path}"
     if query:
@@ -910,8 +979,6 @@ def _request_json(
     except urllib.error.URLError as exc:
         raise OpenCodeServerError(f"{method} {path} failed: {exc}") from exc
 
-    if not isinstance(value, dict):
-        raise OpenCodeServerError(f"{method} {path} returned a non-object JSON response.")
     return value
 
 
@@ -1087,6 +1154,41 @@ def _extract_text_response(value: dict[str, Any]) -> str:
     if text_parts:
         return "\n".join(text_parts).strip()
     return json.dumps(value, sort_keys=True)
+
+
+def _normalize_opencode_message(value: dict[str, Any]) -> AgentChatMessage | None:
+    info = value.get("info")
+    parts = value.get("parts")
+    if not isinstance(info, dict) or not isinstance(parts, list):
+        return None
+    source_message_id = info.get("id")
+    role = info.get("role")
+    if not isinstance(source_message_id, str) or role not in ("user", "assistant"):
+        return None
+
+    text = "\n".join(
+        part["text"]
+        for part in parts
+        if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str)
+    ).strip()
+    time_value = info.get("time")
+    time_info = time_value if isinstance(time_value, dict) else {}
+    created_at = _opencode_milliseconds_to_iso(time_info.get("created"))
+    if created_at is None:
+        return None
+    return AgentChatMessage(
+        source_message_id=source_message_id,
+        role=role,
+        text=text,
+        created_at=created_at,
+        completed_at=_opencode_milliseconds_to_iso(time_info.get("completed")),
+    )
+
+
+def _opencode_milliseconds_to_iso(value: object) -> str | None:
+    if not isinstance(value, int | float):
+        return None
+    return datetime.fromtimestamp(value / 1000, tz=UTC).isoformat()
 
 
 def _observed_command(command: list[str]) -> str:

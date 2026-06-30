@@ -11,11 +11,12 @@ from typer.testing import CliRunner
 
 import lamplighter_opencode
 from lamplighter_opencode.cli import app
-from lamplighter_opencode.contracts.models import AgentSessionSpec, AgentTurnRequest
+from lamplighter_opencode.contracts.models import AgentChatHistory, AgentChatMessage, AgentSessionSpec, AgentTurnRequest
 from lamplighter_opencode.runtime.workspace import (
     azure_openai_base_url,
     azure_openai_resource_name,
     azure_openai_responses_url,
+    get_agent_session_history,
     isolated_opencode_environment,
     materialize_opencode_config,
     normalize_opencode_event,
@@ -145,6 +146,107 @@ def test_submit_turn_command_returns_fake_result(tmp_path) -> None:
 
     assert result.exit_code == 0
     assert "Fake OpenCode response" in result.stdout
+
+
+def test_get_agent_session_history_normalizes_opencode_messages(tmp_path, monkeypatch) -> None:
+    """OpenCode history becomes a stable, user-visible conversation snapshot."""
+    controller_workspace = tmp_path / "controller"
+    agent_root = controller_workspace / "agents" / "agent_1"
+    runtime = agent_root / "runtime"
+    workspace = agent_root / "workspace"
+    session_root = runtime / "sessions" / "session_1"
+    workspace.mkdir(parents=True)
+    session_root.mkdir(parents=True)
+    (runtime / "opencode-server.json").write_text(
+        json.dumps(
+            {
+                "status": "ready",
+                "endpoint": "http://127.0.0.1:4097",
+                "auth": {"username": "opencode", "password": "test-password"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (session_root / "session.json").write_text(
+        json.dumps({"opencode_session_id": "oc_session_1"}),
+        encoding="utf-8",
+    )
+
+    def fake_urlopen(http_request, timeout=60):  # noqa: ANN001, ANN202, ARG001
+        assert http_request.method == "GET"
+        assert http_request.headers["Authorization"].startswith("Basic ")
+        return _JsonResponse(
+            [
+                {
+                    "info": {
+                        "id": "message_user",
+                        "role": "user",
+                        "time": {"created": 1_700_000_000_000},
+                    },
+                    "parts": [{"type": "text", "text": "Hello"}],
+                },
+                {
+                    "info": {
+                        "id": "message_assistant",
+                        "role": "assistant",
+                        "time": {
+                            "created": 1_700_000_000_100,
+                            "completed": 1_700_000_000_200,
+                        },
+                    },
+                    "parts": [
+                        {"type": "step-start"},
+                        {"type": "text", "text": "Hi"},
+                        {"type": "text", "text": "there"},
+                    ],
+                },
+            ]
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    history = get_agent_session_history(controller_workspace, "agent_1", "session_1")
+
+    assert history.opencode_session_id == "oc_session_1"
+    assert [message.source_message_id for message in history.messages] == ["message_user", "message_assistant"]
+    assert history.messages[1].text == "Hi\nthere"
+    assert len(history.raw_messages) == 2
+
+
+def test_get_session_history_command_emits_valid_json(tmp_path, monkeypatch) -> None:
+    """The runner-facing CLI command emits the normalized history contract."""
+    history = AgentChatHistory(
+        agent_id="agent_1",
+        agent_session_id="session_1",
+        opencode_session_id="oc_session_1",
+        observed_at="2026-06-30T00:00:00+00:00",
+        messages=[
+            AgentChatMessage(
+                source_message_id="message_1",
+                role="user",
+                text="Hello",
+                created_at="2026-06-30T00:00:00+00:00",
+            )
+        ],
+    )
+    monkeypatch.setattr("lamplighter_opencode.cli.get_agent_session_history", lambda *args: history)
+
+    result = runner.invoke(
+        app,
+        [
+            "get-session-history",
+            "--agent",
+            "agent_1",
+            "--session",
+            "session_1",
+            "--controller-workspace",
+            str(tmp_path),
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)["messages"][0]["source_message_id"] == "message_1"
 
 
 def test_start_session_command_writes_opencode_server_metadata(tmp_path, monkeypatch) -> None:

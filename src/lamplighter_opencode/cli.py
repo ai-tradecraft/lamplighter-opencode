@@ -20,6 +20,7 @@ from lamplighter_opencode.runtime.layout import agent_layout
 from lamplighter_opencode.runtime.workspace import (
     cancel_agent_session,
     create_agent_session,
+    get_agent_session_history,
     materialize_agent,
     materialize_session_workspace,
     start_agent,
@@ -191,6 +192,27 @@ def cancel_session_command(
         typer.echo(json.dumps(metadata, indent=2))
         return
     console.print(f"Cancelled session {session}")
+
+
+@app.command("get-session-history")
+def get_session_history_command(
+    agent: Annotated[str, typer.Option()],
+    session: Annotated[str, typer.Option()],
+    controller_workspace: ControllerWorkspaceOption,
+    json_output: JsonOutputOption = False,
+) -> None:
+    """Read a session's authoritative conversation history from OpenCode."""
+    try:
+        history = get_agent_session_history(controller_workspace, agent, session)
+        payload = history.to_dict()
+        validate_contract("agent_chat_history.schema.json", payload)
+    except (ContractValidationError, OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        console.print(f"[red]Failed to read session history:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    if json_output:
+        typer.echo(json.dumps(payload, indent=2))
+        return
+    console.print(f"Read {len(history.messages)} messages from session {session}")
 
 
 @app.command("prepare-session")

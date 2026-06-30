@@ -312,6 +312,48 @@ class AgentTurnResult:
 
 
 @dataclass(frozen=True)
+class AgentChatMessage:
+    """Normalized user-visible message from an OpenCode session."""
+
+    source_message_id: str
+    role: Literal["user", "assistant"]
+    text: str
+    created_at: str
+    completed_at: str | None = None
+
+    def to_dict(self) -> JsonObject:
+        return {
+            "source_message_id": self.source_message_id,
+            "role": self.role,
+            "text": self.text,
+            "created_at": self.created_at,
+            "completed_at": self.completed_at,
+        }
+
+
+@dataclass(frozen=True)
+class AgentChatHistory:
+    """Authoritative conversation snapshot read from OpenCode."""
+
+    agent_id: str
+    agent_session_id: str
+    opencode_session_id: str
+    observed_at: str
+    messages: list[AgentChatMessage]
+    raw_messages: list[JsonObject] = field(default_factory=list)
+
+    def to_dict(self) -> JsonObject:
+        return {
+            "agent_id": self.agent_id,
+            "agent_session_id": self.agent_session_id,
+            "opencode_session_id": self.opencode_session_id,
+            "observed_at": self.observed_at,
+            "messages": [message.to_dict() for message in self.messages],
+            "raw_messages": self.raw_messages,
+        }
+
+
+@dataclass(frozen=True)
 class RuntimeEvent:
     """Append-only event emitted by Lamplighter while materializing a session."""
 
