@@ -151,52 +151,6 @@ public sealed class RunnerCommandEndpointTests : IClassFixture<WebApplicationFac
     }
 
     [Fact]
-    public async Task CreateSessionQueuesPrepareCommand()
-    {
-        using var client = _factory.CreateClient();
-
-        var response = await client.PostAsJsonAsync("/api/agent-sessions", new CreateAgentSessionRequest());
-        response.EnsureSuccessStatusCode();
-        var session = await response.Content.ReadFromJsonAsync<AgentSessionRecord>(JsonDefaults.Options);
-        Assert.NotNull(session);
-        Assert.Equal("preparing", session.Status);
-
-        var commands = await PollCommandsAsync(client);
-        var command = Assert.Single(commands, command =>
-            command.AgentSessionId == session.Id &&
-            command.Type == RunnerCommandTypes.PrepareAgentSession);
-
-        Assert.Equal(RunnerCommandStatuses.Pending, command.Status);
-        Assert.NotNull(command.PayloadRef);
-
-        var payload = await ReadContentAsync(client, command.PayloadRef!);
-        Assert.Contains("\"agent_session_id\"", payload);
-        Assert.Contains(session.Id, payload);
-    }
-
-    [Fact]
-    public async Task CreateSessionForControllerQueuesCommandForThatRunner()
-    {
-        using var client = _factory.CreateClient();
-        await PostHeartbeatAsync(client, "runner_local");
-
-        var response = await client.PostAsJsonAsync(
-            "/api/agent-sessions",
-            new CreateAgentSessionRequest(ControllerId: "runner_local"));
-        response.EnsureSuccessStatusCode();
-        var session = await response.Content.ReadFromJsonAsync<AgentSessionRecord>(JsonDefaults.Options);
-        Assert.NotNull(session);
-        Assert.Equal("runner_local", session.ControllerId);
-
-        var otherRunnerCommands = await PollCommandsAsync(client, "runner_other");
-        Assert.DoesNotContain(otherRunnerCommands, command => command.AgentSessionId == session.Id);
-
-        var commands = await PollCommandsAsync(client, "runner_local");
-        var command = Assert.Single(commands, command => command.AgentSessionId == session.Id);
-        Assert.Equal("runner_local", command.RunnerId);
-    }
-
-    [Fact]
     public async Task RunnerHeartbeatRegistersControllerAndAgentInventory()
     {
         using var client = _factory.CreateClient();
@@ -211,11 +165,21 @@ public sealed class RunnerCommandEndpointTests : IClassFixture<WebApplicationFac
                 new RunnerAgentInventoryItem(
                     AgentSessionId: "session_local",
                     Status: "ready",
-                    RuntimePath: "/tmp/session_local",
-                    WorkspacePath: "/tmp/session_local/workspace",
+                    RuntimePath: "/tmp/agent_local/runtime",
+                    WorkspacePath: "/tmp/agent_local/workspace",
                     OpenCodeEndpoint: "http://127.0.0.1:4097",
                     OpenCodePid: 123,
-                    ObservedAt: observedAt)
+                    ObservedAt: observedAt,
+                    AgentId: "agent_local",
+                    Sessions:
+                    [
+                        new RunnerAgentSessionInventoryItem(
+                            "session_local",
+                            "ready",
+                            "/tmp/agent_local/runtime/sessions/session_local",
+                            "opencode_local",
+                            observedAt)
+                    ])
             ]);
 
         var response = await client.PostAsJsonAsync("/api/runner/heartbeat", heartbeat, RunnerProtocolJson.Options);
@@ -233,7 +197,8 @@ public sealed class RunnerCommandEndpointTests : IClassFixture<WebApplicationFac
         var controller = Assert.Single(controllers, item => item.RunnerId == "runner_local");
         Assert.Equal("online", controller.Status);
         var agent = Assert.Single(controller.Agents);
-        Assert.Equal("session_local", agent.AgentSessionId);
+        Assert.Equal("agent_local", agent.AgentId);
+        Assert.Single(agent.Sessions!);
 
         var session = await client.GetFromJsonAsync<AgentSessionRecord>(
             "/api/agent-sessions/session_local",
@@ -270,8 +235,8 @@ public sealed class RunnerCommandEndpointTests : IClassFixture<WebApplicationFac
         Assert.Equal(System.Net.HttpStatusCode.NotFound, staleController.StatusCode);
 
         var createResponse = await client.PostAsJsonAsync(
-            "/api/agent-sessions",
-            new CreateAgentSessionRequest(ControllerId: "runner_stale"));
+            "/api/agent-controllers/runner_stale/agents",
+            new CreateAgentRequest());
         Assert.Equal(System.Net.HttpStatusCode.Conflict, createResponse.StatusCode);
     }
 
@@ -279,13 +244,7 @@ public sealed class RunnerCommandEndpointTests : IClassFixture<WebApplicationFac
     public async Task RunnerHeartbeatDoesNotOverwriteCancelledSessionStatus()
     {
         using var client = _factory.CreateClient();
-        await PostHeartbeatAsync(client, "runner_terminal");
-        var sessionResponse = await client.PostAsJsonAsync(
-            "/api/agent-sessions",
-            new CreateAgentSessionRequest(ControllerId: "runner_terminal"));
-        sessionResponse.EnsureSuccessStatusCode();
-        var session = await sessionResponse.Content.ReadFromJsonAsync<AgentSessionRecord>(JsonDefaults.Options);
-        Assert.NotNull(session);
+        var session = await CreateAgentSessionAsync(client, "runner_terminal");
 
         var cancelledEvent = new RunnerEventEnvelope(
             Id: "event_cancelled",
@@ -296,7 +255,9 @@ public sealed class RunnerCommandEndpointTests : IClassFixture<WebApplicationFac
             PayloadRef: null,
             CausationId: "cmd_cancel",
             CorrelationId: session.Id,
-            CreatedAt: DateTimeOffset.UtcNow);
+            CreatedAt: DateTimeOffset.UtcNow,
+            AgentId: session.AgentId,
+            SessionId: session.Id);
         var eventResponse = await client.PostAsJsonAsync(
             "/api/runner/events",
             cancelledEvent,
@@ -313,11 +274,21 @@ public sealed class RunnerCommandEndpointTests : IClassFixture<WebApplicationFac
                 new RunnerAgentInventoryItem(
                     AgentSessionId: session.Id,
                     Status: "ready",
-                    RuntimePath: session.RuntimePath,
+                    RuntimePath: "/tmp/agent_terminal/runtime",
                     WorkspacePath: session.WorkspacePath,
                     OpenCodeEndpoint: "http://127.0.0.1:4097",
                     OpenCodePid: 123,
-                    ObservedAt: DateTimeOffset.UtcNow)
+                    ObservedAt: DateTimeOffset.UtcNow,
+                    AgentId: session.AgentId,
+                    Sessions:
+                    [
+                        new RunnerAgentSessionInventoryItem(
+                            session.Id,
+                            "ready",
+                            $"/tmp/agent_terminal/runtime/sessions/{session.Id}",
+                            "opencode_terminal",
+                            DateTimeOffset.UtcNow)
+                    ])
             ]);
         var heartbeatResponse = await client.PostAsJsonAsync(
             "/api/runner/heartbeat",
@@ -337,10 +308,7 @@ public sealed class RunnerCommandEndpointTests : IClassFixture<WebApplicationFac
     public async Task SubmitTurnQueuesTurnCommandWithoutHarnessResponse()
     {
         using var client = _factory.CreateClient();
-        var sessionResponse = await client.PostAsJsonAsync("/api/agent-sessions", new CreateAgentSessionRequest());
-        sessionResponse.EnsureSuccessStatusCode();
-        var session = await sessionResponse.Content.ReadFromJsonAsync<AgentSessionRecord>(JsonDefaults.Options);
-        Assert.NotNull(session);
+        var session = await CreateAgentSessionAsync(client);
 
         var turnResponse = await client.PostAsJsonAsync(
             $"/api/agent-sessions/{session.Id}/turns",
@@ -374,10 +342,7 @@ public sealed class RunnerCommandEndpointTests : IClassFixture<WebApplicationFac
     public async Task RunnerReadyEventUpdatesSessionStatus()
     {
         using var client = _factory.CreateClient();
-        var sessionResponse = await client.PostAsJsonAsync("/api/agent-sessions", new CreateAgentSessionRequest());
-        sessionResponse.EnsureSuccessStatusCode();
-        var session = await sessionResponse.Content.ReadFromJsonAsync<AgentSessionRecord>(JsonDefaults.Options);
-        Assert.NotNull(session);
+        var session = await CreateAgentSessionAsync(client);
 
         var runnerEvent = new RunnerEventEnvelope(
             Id: "event_ready",
@@ -405,10 +370,7 @@ public sealed class RunnerCommandEndpointTests : IClassFixture<WebApplicationFac
     public async Task RunnerTurnCompletedEventUpdatesTurnResponse()
     {
         using var client = _factory.CreateClient();
-        var sessionResponse = await client.PostAsJsonAsync("/api/agent-sessions", new CreateAgentSessionRequest());
-        sessionResponse.EnsureSuccessStatusCode();
-        var session = await sessionResponse.Content.ReadFromJsonAsync<AgentSessionRecord>(JsonDefaults.Options);
-        Assert.NotNull(session);
+        var session = await CreateAgentSessionAsync(client);
 
         var turnResponse = await client.PostAsJsonAsync(
             $"/api/agent-sessions/{session.Id}/turns",
@@ -462,10 +424,7 @@ public sealed class RunnerCommandEndpointTests : IClassFixture<WebApplicationFac
     public async Task RunnerTurnFailedEventProjectsStructuredFailureDetails()
     {
         using var client = _factory.CreateClient();
-        var sessionResponse = await client.PostAsJsonAsync("/api/agent-sessions", new CreateAgentSessionRequest());
-        sessionResponse.EnsureSuccessStatusCode();
-        var session = await sessionResponse.Content.ReadFromJsonAsync<AgentSessionRecord>(JsonDefaults.Options);
-        Assert.NotNull(session);
+        var session = await CreateAgentSessionAsync(client);
 
         var turnResponse = await client.PostAsJsonAsync(
             $"/api/agent-sessions/{session.Id}/turns",
@@ -518,10 +477,7 @@ public sealed class RunnerCommandEndpointTests : IClassFixture<WebApplicationFac
     public async Task RunnerTurnFailedEventAcceptsPlainTextProcessDiagnostics()
     {
         using var client = _factory.CreateClient();
-        var sessionResponse = await client.PostAsJsonAsync("/api/agent-sessions", new CreateAgentSessionRequest());
-        sessionResponse.EnsureSuccessStatusCode();
-        var session = await sessionResponse.Content.ReadFromJsonAsync<AgentSessionRecord>(JsonDefaults.Options);
-        Assert.NotNull(session);
+        var session = await CreateAgentSessionAsync(client);
 
         var turnResponse = await client.PostAsJsonAsync(
             $"/api/agent-sessions/{session.Id}/turns",
@@ -554,6 +510,41 @@ public sealed class RunnerCommandEndpointTests : IClassFixture<WebApplicationFac
         Assert.NotNull(refreshed);
         Assert.Equal("failed", refreshed.Status);
         Assert.Contains("exit_code: 2", refreshed.FailureSummary);
+    }
+
+    private static async Task<AgentSessionRecord> CreateAgentSessionAsync(
+        HttpClient client,
+        string runnerId = "runner_test")
+    {
+        await PostHeartbeatAsync(client, runnerId);
+        var agentResponse = await client.PostAsJsonAsync(
+            $"/api/agent-controllers/{runnerId}/agents",
+            new CreateAgentRequest());
+        agentResponse.EnsureSuccessStatusCode();
+        var agent = await agentResponse.Content.ReadFromJsonAsync<AgentRecord>(JsonDefaults.Options);
+        Assert.NotNull(agent);
+        var readyEvent = new RunnerEventEnvelope(
+            Id: Ids.New("event"),
+            RunnerId: runnerId,
+            AgentSessionId: agent.Id,
+            CommandId: null,
+            Type: RunnerEventTypes.AgentReady,
+            PayloadRef: null,
+            CausationId: null,
+            CorrelationId: agent.Id,
+            CreatedAt: DateTimeOffset.UtcNow,
+            AgentId: agent.Id);
+        (await client.PostAsJsonAsync(
+            "/api/runner/events",
+            readyEvent,
+            RunnerProtocolJson.Options)).EnsureSuccessStatusCode();
+        var sessionResponse = await client.PostAsJsonAsync(
+            $"/api/agents/{agent.Id}/sessions",
+            new CreateAgentSessionRequest());
+        sessionResponse.EnsureSuccessStatusCode();
+        var session = await sessionResponse.Content.ReadFromJsonAsync<AgentSessionRecord>(JsonDefaults.Options);
+        Assert.NotNull(session);
+        return session;
     }
 
     private static async Task<IReadOnlyCollection<RunnerCommandEnvelope>> PollCommandsAsync(

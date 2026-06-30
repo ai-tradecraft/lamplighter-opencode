@@ -145,10 +145,6 @@ app.MapPost("/api/runner/heartbeat", async (
                 agent.WorkspacePath,
                 cancellationToken);
         }
-        if (agent.AgentId is null)
-        {
-            await sessionStore.UpsertInventorySessionAsync(heartbeat.RunnerId, agent, cancellationToken);
-        }
     }
 
     return Results.Accepted();
@@ -323,44 +319,6 @@ app.MapPost("/api/agents/{agentId}/sessions", async (
         sessionId: session.Id);
     await runnerStore.EnqueueCommandAsync(command, cancellationToken);
     await PublishAsync(sessionStore, hub, session.Id, null, "agent_session.command_queued", command, cancellationToken);
-    return Results.Created($"/api/agent-sessions/{session.Id}", session);
-});
-
-app.MapPost("/api/agent-sessions", async (
-    CreateAgentSessionRequest request,
-    AgentSessionStore store,
-    RunnerControlStore runnerStore,
-    IHubContext<AgentSessionHub> hub,
-    CancellationToken cancellationToken) =>
-{
-    if (!string.IsNullOrWhiteSpace(request.ControllerId))
-    {
-        var heartbeat = await runnerStore.GetRunnerHeartbeatAsync(request.ControllerId, cancellationToken);
-        if (heartbeat is null || !AgentControllerRecord.IsActive(heartbeat))
-        {
-            return Results.Conflict(new
-            {
-                message = $"Agent controller {request.ControllerId} is not active."
-            });
-        }
-    }
-
-    var session = AgentSessionRecord.Create(request, RuntimePaths.Root);
-    await store.UpsertSessionAsync(session, cancellationToken);
-    await PublishAsync(store, hub, session.Id, null, "agent_session.preparing", new { session.Id }, cancellationToken);
-
-    var spec = AgentSessionSpec.FromSession(session);
-    var payloadRef = await runnerStore.SaveJsonContentAsync(spec, "application/vnd.tradecraft.agent-session-spec+json", cancellationToken);
-    var command = RunnerCommandFactory.Create(
-        session.Id,
-        RunnerCommandTypes.PrepareAgentSession,
-        payloadRef,
-        correlationId: session.Id,
-        idempotencyKey: session.Id,
-        runnerId: request.ControllerId);
-    await runnerStore.EnqueueCommandAsync(command, cancellationToken);
-    await PublishAsync(store, hub, session.Id, null, "agent_session.command_queued", command, cancellationToken);
-
     return Results.Created($"/api/agent-sessions/{session.Id}", session);
 });
 
@@ -973,7 +931,10 @@ public sealed class AgentSessionStore
                 CreatedAt = existing.CreatedAt,
                 BranchName = existing.BranchName,
                 ReadyAt = status == "ready" ? existing.ReadyAt ?? inventory.ObservedAt : existing.ReadyAt,
-                Status = IsTerminalSessionStatus(existing.Status) ? existing.Status : status
+                Status = IsTerminalSessionStatus(existing.Status) ? existing.Status : status,
+                EndedAt = existing.EndedAt ?? observed.EndedAt,
+                FailedAt = existing.FailedAt ?? observed.FailedAt,
+                FailureSummary = existing.FailureSummary
             };
         }
         await UpsertSessionAsync(observed, cancellationToken);
