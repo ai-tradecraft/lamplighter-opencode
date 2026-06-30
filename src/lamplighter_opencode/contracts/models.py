@@ -59,6 +59,90 @@ class OpenCodeBackendConfig:
 
 
 @dataclass(frozen=True)
+class AgentSpec:
+    """Portable contract for one isolated OpenCode-backed agent."""
+
+    agent_id: str
+    workspace_ref: str
+    backend: OpenCodeBackendConfig
+    agent_definition_id: str | None = None
+    repo_ref: str | None = None
+    base_revision: str | None = None
+    branch_name: str | None = None
+    tool_profile: JsonObject = field(default_factory=dict)
+    mcp_profile: JsonObject = field(default_factory=dict)
+    telemetry: JsonObject = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, value: JsonObject) -> AgentSpec:
+        return cls(
+            agent_id=value["agent_id"],
+            workspace_ref=value["workspace_ref"],
+            backend=OpenCodeBackendConfig.from_dict(value["backend"]),
+            agent_definition_id=value.get("agent_definition_id"),
+            repo_ref=value.get("repo_ref"),
+            base_revision=value.get("base_revision"),
+            branch_name=value.get("branch_name"),
+            tool_profile=value.get("tool_profile", {}),
+            mcp_profile=value.get("mcp_profile", {}),
+            telemetry=value.get("telemetry", {}),
+        )
+
+    def to_dict(self) -> JsonObject:
+        return {
+            "agent_id": self.agent_id,
+            "workspace_ref": self.workspace_ref,
+            "backend": self.backend.to_dict(),
+            "agent_definition_id": self.agent_definition_id,
+            "repo_ref": self.repo_ref,
+            "base_revision": self.base_revision,
+            "branch_name": self.branch_name,
+            "tool_profile": self.tool_profile,
+            "mcp_profile": self.mcp_profile,
+            "telemetry": self.telemetry,
+        }
+
+
+@dataclass(frozen=True)
+class AgentChatSessionSpec:
+    """Portable contract for one conversation owned by an agent."""
+
+    session_id: str
+    agent_id: str
+    context_package: JsonObject
+    goal_run_id: str | None = None
+    phase_run_id: str | None = None
+    artifact_contract: JsonObject = field(default_factory=dict)
+    timeout_policy: JsonObject = field(default_factory=dict)
+    telemetry: JsonObject = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, value: JsonObject) -> AgentChatSessionSpec:
+        return cls(
+            session_id=value["session_id"],
+            agent_id=value["agent_id"],
+            context_package=value["context_package"],
+            goal_run_id=value.get("goal_run_id"),
+            phase_run_id=value.get("phase_run_id"),
+            artifact_contract=value.get("artifact_contract", {}),
+            timeout_policy=value.get("timeout_policy", {}),
+            telemetry=value.get("telemetry", {}),
+        )
+
+    def to_dict(self) -> JsonObject:
+        return {
+            "session_id": self.session_id,
+            "agent_id": self.agent_id,
+            "context_package": self.context_package,
+            "goal_run_id": self.goal_run_id,
+            "phase_run_id": self.phase_run_id,
+            "artifact_contract": self.artifact_contract,
+            "timeout_policy": self.timeout_policy,
+            "telemetry": self.telemetry,
+        }
+
+
+@dataclass(frozen=True)
 class AgentSessionSpec:
     """Portable launch contract materialized by Lamplighter."""
 

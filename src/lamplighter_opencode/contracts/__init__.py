@@ -1,7 +1,9 @@
 """Public contract models and validation helpers for Lamplighter."""
 
 from lamplighter_opencode.contracts.models import (
+    AgentChatSessionSpec,
     AgentSessionSpec,
+    AgentSpec,
     AgentTurnRequest,
     AgentTurnResult,
     OpenCodeBackendConfig,
@@ -11,6 +13,8 @@ from lamplighter_opencode.contracts.models import (
 from lamplighter_opencode.contracts.validation import ContractValidationError, validate_contract
 
 __all__ = [
+    "AgentChatSessionSpec",
+    "AgentSpec",
     "AgentSessionSpec",
     "AgentTurnRequest",
     "AgentTurnResult",

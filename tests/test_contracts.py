@@ -2,7 +2,7 @@
 
 import pytest
 
-from lamplighter_opencode.contracts.models import AgentSessionSpec, AgentTurnRequest
+from lamplighter_opencode.contracts.models import AgentChatSessionSpec, AgentSessionSpec, AgentSpec, AgentTurnRequest
 from lamplighter_opencode.contracts.validation import ContractValidationError, validate_contract
 
 
@@ -23,6 +23,44 @@ def test_agent_session_spec_rejects_extra_properties() -> None:
 
     with pytest.raises(ContractValidationError, match="Additional properties"):
         validate_contract("agent_session_spec.schema.json", value)
+
+
+def test_agent_and_chat_session_have_distinct_identifiers() -> None:
+    agent_value = {
+        "agent_id": "agent_1",
+        "workspace_ref": "local://agent-1/workspace",
+        "backend": _valid_session_spec()["backend"],
+        "tool_profile": {},
+        "mcp_profile": {},
+        "telemetry": {},
+    }
+    session_value = {
+        "session_id": "session_1",
+        "agent_id": "agent_1",
+        "context_package": {"goal": "test"},
+        "artifact_contract": {},
+        "timeout_policy": {},
+        "telemetry": {},
+    }
+
+    validate_contract("agent_spec.schema.json", agent_value)
+    validate_contract("agent_chat_session_spec.schema.json", session_value)
+
+    agent = AgentSpec.from_dict(agent_value)
+    session = AgentChatSessionSpec.from_dict(session_value)
+    assert agent.agent_id == session.agent_id
+    assert session.session_id == "session_1"
+
+
+def test_agent_contract_rejects_path_like_identifier() -> None:
+    value = {
+        "agent_id": "agent_../escape",
+        "workspace_ref": "local://workspace",
+        "backend": _valid_session_spec()["backend"],
+    }
+
+    with pytest.raises(ContractValidationError, match="does not match"):
+        validate_contract("agent_spec.schema.json", value)
 
 
 def test_agent_turn_request_is_named_for_agent_work() -> None:

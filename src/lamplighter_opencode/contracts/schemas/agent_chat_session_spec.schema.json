@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tradecraft.local/schemas/lamplighter/agent_chat_session_spec.schema.json",
+  "title": "AgentChatSessionSpec",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["session_id", "agent_id", "context_package"],
+  "properties": {
+    "session_id": {
+      "type": "string",
+      "pattern": "^session_[A-Za-z0-9_-]+$"
+    },
+    "agent_id": {
+      "type": "string",
+      "pattern": "^agent_[A-Za-z0-9_-]+$"
+    },
+    "context_package": {
+      "type": "object"
+    },
+    "goal_run_id": {
+      "type": ["string", "null"]
+    },
+    "phase_run_id": {
+      "type": ["string", "null"]
+    },
+    "artifact_contract": {
+      "type": "object"
+    },
+    "timeout_policy": {
+      "type": "object"
+    },
+    "telemetry": {
+      "type": "object"
+    }
+  }
+}
