@@ -9,6 +9,6 @@ public sealed record RunnerOptions
     public TimeSpan HeartbeatInterval { get; init; } = TimeSpan.FromSeconds(10);
     public int LeaseSeconds { get; init; } = 60;
     public TimeSpan RetryBackoff { get; init; } = TimeSpan.FromSeconds(5);
-    public string RuntimeRoot { get; init; } = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../.agent-runtime"));
+    public string ControllerWorkspace { get; set; } = "";
     public string? HarnessRepoRoot { get; init; }
 }

@@ -76,7 +76,6 @@ run_runner() {
   source_env "$POC/src/ChatThroughHarness.Runner/.env"
   export Runner__RunnerId="${Runner__RunnerId:-runner_local}"
   export Runner__OrchestratorBaseUri="${Runner__OrchestratorBaseUri:-http://127.0.0.1:5087}"
-  export Runner__RuntimeRoot="${Runner__RuntimeRoot:-$POC/.agent-runtime}"
   export LAMPLIGHTER_OPENCODE_CONFIG_MODE="${LAMPLIGHTER_OPENCODE_CONFIG_MODE:-inherit-global}"
   wait_for_service \
     "Tradecraft API" \

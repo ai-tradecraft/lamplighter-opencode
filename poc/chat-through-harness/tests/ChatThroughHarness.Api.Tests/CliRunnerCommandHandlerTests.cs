@@ -27,7 +27,7 @@ public sealed class CliRunnerCommandHandlerTests
         var handler = new CliRunnerCommandHandler(
             api,
             process,
-            Options.Create(new RunnerOptions { RunnerId = "runner_1", RuntimeRoot = NewRuntimeRoot() }),
+            Options.Create(new RunnerOptions { RunnerId = "runner_1", ControllerWorkspace = NewRuntimeRoot() }),
             NullLogger<CliRunnerCommandHandler>.Instance);
         var command = new RunnerCommandEnvelope(
             Id: "cmd_1",
@@ -79,7 +79,7 @@ public sealed class CliRunnerCommandHandlerTests
         var handler = new CliRunnerCommandHandler(
             api,
             process,
-            Options.Create(new RunnerOptions { RunnerId = "runner_1", RuntimeRoot = NewRuntimeRoot() }),
+            Options.Create(new RunnerOptions { RunnerId = "runner_1", ControllerWorkspace = NewRuntimeRoot() }),
             NullLogger<CliRunnerCommandHandler>.Instance);
         var command = new RunnerCommandEnvelope(
             Id: "cmd_1",
@@ -132,7 +132,7 @@ public sealed class CliRunnerCommandHandlerTests
         var handler = new CliRunnerCommandHandler(
             api,
             process,
-            Options.Create(new RunnerOptions { RunnerId = "runner_1", RuntimeRoot = NewRuntimeRoot() }),
+            Options.Create(new RunnerOptions { RunnerId = "runner_1", ControllerWorkspace = NewRuntimeRoot() }),
             NullLogger<CliRunnerCommandHandler>.Instance);
         var command = new RunnerCommandEnvelope(
             Id: "cmd_1",

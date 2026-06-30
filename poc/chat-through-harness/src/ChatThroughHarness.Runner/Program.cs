@@ -5,7 +5,14 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 
 var builder = Host.CreateApplicationBuilder(args);
-builder.Services.Configure<RunnerOptions>(builder.Configuration.GetSection("Runner"));
+builder.Services
+    .AddOptions<RunnerOptions>()
+    .Bind(builder.Configuration.GetSection("Runner"))
+    .PostConfigure(options =>
+    {
+        options.ControllerWorkspace = ControllerWorkspaceResolver.ResolveFromEnvironment();
+        ControllerWorkspaceResolver.EnsureWritable(options.ControllerWorkspace);
+    });
 builder.Services.AddHttpClient<RunnerApiClient>((sp, client) =>
 {
     var options = sp.GetRequiredService<IOptions<RunnerOptions>>().Value;

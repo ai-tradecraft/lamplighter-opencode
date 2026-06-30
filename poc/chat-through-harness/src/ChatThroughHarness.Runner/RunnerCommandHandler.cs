@@ -58,7 +58,7 @@ public sealed class CliRunnerCommandHandler(
 
         var prepareOutput = await processRunner.RunAsync(
             "uv",
-            ["run", "lamplighter-opencode", "prepare-session", "--spec", specPath, "--runtime-root", _options.RuntimeRoot, "--json"],
+            ["run", "lamplighter-opencode", "prepare-session", "--spec", specPath, "--runtime-root", _options.ControllerWorkspace, "--json"],
             cancellationToken);
 
         if (prepareOutput.ExitCode != 0)
@@ -74,7 +74,7 @@ public sealed class CliRunnerCommandHandler(
 
         var startOutput = await processRunner.RunAsync(
             "uv",
-            ["run", "lamplighter-opencode", "start-session", "--session", command.AgentSessionId, "--runtime-root", _options.RuntimeRoot, "--json"],
+            ["run", "lamplighter-opencode", "start-session", "--session", command.AgentSessionId, "--runtime-root", _options.ControllerWorkspace, "--json"],
             cancellationToken);
 
         return await CompleteFromProcessAsync(
@@ -261,7 +261,7 @@ public sealed class CliRunnerCommandHandler(
 
     private string SessionRoot(string sessionId)
     {
-        return Path.Combine(_options.RuntimeRoot, "sessions", sessionId);
+        return Path.Combine(_options.ControllerWorkspace, "sessions", sessionId);
     }
 }
 

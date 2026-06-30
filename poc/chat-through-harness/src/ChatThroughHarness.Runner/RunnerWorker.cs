@@ -17,9 +17,10 @@ public sealed class RunnerWorker(
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         logger.LogInformation(
-            "Lamplighter runner {RunnerId} starting for {OrchestratorBaseUri}.",
+            "Lamplighter runner {RunnerId} starting for {OrchestratorBaseUri} with controller workspace {ControllerWorkspace}.",
             _options.RunnerId,
-            _options.OrchestratorBaseUri);
+            _options.OrchestratorBaseUri,
+            _options.ControllerWorkspace);
 
         var heartbeatTask = RunHeartbeatLoopAsync(stoppingToken);
         var commandTask = commandLoop.RunAsync(stoppingToken);
@@ -39,7 +40,7 @@ public sealed class RunnerWorker(
     private async Task PublishHeartbeatAsync(CancellationToken cancellationToken)
     {
         var agents = await RunnerAgentInventory.ScanAsync(
-            _options.RuntimeRoot,
+            _options.ControllerWorkspace,
             DateTimeOffset.UtcNow,
             healthProbe,
             cancellationToken);
