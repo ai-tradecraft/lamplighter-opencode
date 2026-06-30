@@ -61,6 +61,11 @@ type Diagnostics = {
 };
 
 const api = import.meta.env.VITE_API_BASE_URL ?? "";
+const hiddenAgentStatuses = new Set(["stopped", "cancelled"]);
+
+function isActiveAgent(agent: ControllerAgent) {
+  return !hiddenAgentStatuses.has(agent.status.toLowerCase());
+}
 
 type ClientLogLevel = "debug" | "information" | "warning" | "error";
 type ClientLogContext = Record<string, string | number | boolean | null | undefined>;
@@ -127,6 +132,7 @@ function App() {
   const [turns, setTurns] = useState<Turn[]>([]);
   const [events, setEvents] = useState<RuntimeEvent[]>([]);
   const [prompt, setPrompt] = useState("");
+  const [showAllAgents, setShowAllAgents] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -146,6 +152,9 @@ function App() {
   const selectedController = useMemo(() => {
     return controllers.find((controller) => controller.runnerId === selectedControllerId) ?? null;
   }, [controllers, selectedControllerId]);
+  const visibleAgents = useMemo(() => {
+    return selectedController?.agents.filter((agent) => showAllAgents || isActiveAgent(agent)) ?? [];
+  }, [selectedController, showAllAgents]);
   const chatPlaceholder = busy
     ? "Loading agent session..."
     : !session
@@ -365,19 +374,32 @@ function App() {
               onClick={() => setSelectedControllerId(controller.runnerId)}
             >
               <span>{controller.runnerId}</span>
-              <small>{controller.status} · {controller.agents.length}</small>
+              <small>{controller.status} · {controller.agents.filter(isActiveAgent).length} active</small>
             </button>
           ))}
         </div>
 
-        <div className="panel-title secondary">
-          <Bot size={18} />
-          Agents
+        <div className="panel-title secondary agent-list-heading">
+          <span className="panel-title-label">
+            <Bot size={18} />
+            Agents
+          </span>
+          <label className="show-all-toggle">
+            <input
+              type="checkbox"
+              checked={showAllAgents}
+              onChange={(event) => setShowAllAgents(event.target.checked)}
+            />
+            Show all
+          </label>
         </div>
         <div className="agent-list">
           {!selectedController ? <div className="empty-list">Select a controller.</div> : null}
           {selectedController?.agents.length === 0 ? <div className="empty-list">No agents allocated.</div> : null}
-          {selectedController?.agents.map((agent) => (
+          {selectedController && selectedController.agents.length > 0 && visibleAgents.length === 0 ? (
+            <div className="empty-list">No active agents.</div>
+          ) : null}
+          {visibleAgents.map((agent) => (
             <button
               className={`list-button ${agent.agentSessionId === session?.id ? "selected" : ""}`}
               key={agent.agentSessionId}

@@ -69,6 +69,9 @@ controller to see its allocated agents, create a new agent from that
 controller, or open an existing agent to restore its chat transcript after a
 browser refresh.
 
+The Agents list hides `stopped` and `cancelled` sessions by default. Select
+**Show all** beside the Agents heading to include historical sessions.
+
 Controllers disappear from the active list after 30 seconds without a fresh
 heartbeat. The API also rejects new-agent requests targeting a missing or stale
 controller so commands cannot remain queued for a runner that no longer polls.

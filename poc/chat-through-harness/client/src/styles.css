@@ -74,6 +74,33 @@ button:disabled {
   margin-top: 18px;
 }
 
+.agent-list-heading {
+  justify-content: space-between;
+}
+
+.panel-title-label {
+  align-items: center;
+  display: inline-flex;
+  gap: 8px;
+}
+
+.show-all-toggle {
+  align-items: center;
+  color: #607175;
+  cursor: pointer;
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 600;
+  gap: 6px;
+}
+
+.show-all-toggle input {
+  accent-color: #1d4f4a;
+  height: 16px;
+  margin: 0;
+  width: 16px;
+}
+
 .controller-list,
 .agent-list {
   align-content: start;
