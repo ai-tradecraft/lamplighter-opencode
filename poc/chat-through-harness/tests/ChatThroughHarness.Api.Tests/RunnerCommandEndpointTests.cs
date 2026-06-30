@@ -528,6 +528,78 @@ public sealed class RunnerCommandEndpointTests : IClassFixture<WebApplicationFac
         Assert.Contains("exit_code: 2", refreshed.FailureSummary);
     }
 
+    [Fact]
+    public async Task OpenCodeHistorySyncEnrichesExistingTurnsAndRestoresMissingTurns()
+    {
+        using var client = _factory.CreateClient();
+        var runnerId = Ids.New("runner");
+        var session = await CreateAgentSessionAsync(client, runnerId);
+        var submittedResponse = await client.PostAsJsonAsync(
+            $"/api/agent-sessions/{session.Id}/turns",
+            new SubmitTurnRequest("existing prompt"));
+        submittedResponse.EnsureSuccessStatusCode();
+        var submitted = await submittedResponse.Content.ReadFromJsonAsync<AgentTurnRecord>(JsonDefaults.Options);
+        Assert.NotNull(submitted);
+
+        var syncResponse = await client.PostAsync(
+            $"/api/agent-sessions/{session.Id}/history/sync",
+            content: null);
+        Assert.Equal(System.Net.HttpStatusCode.Accepted, syncResponse.StatusCode);
+        var commands = await PollCommandsAsync(client, runnerId);
+        var syncCommand = Assert.Single(commands, command =>
+            command.Type == RunnerCommandTypes.SyncAgentSessionHistory
+            && command.SessionId == session.Id);
+        Assert.Null(syncCommand.PayloadRef);
+
+        var observedAt = DateTimeOffset.UtcNow;
+        var history = new AgentChatHistory(
+            AgentId: session.AgentId!,
+            AgentSessionId: session.Id,
+            OpenCodeSessionId: "oc_session_1",
+            ObservedAt: observedAt,
+            Messages:
+            [
+                new AgentChatMessage("oc_user_1", "user", "existing prompt", observedAt.AddSeconds(-4), null),
+                new AgentChatMessage("oc_assistant_1", "assistant", "existing response", observedAt.AddSeconds(-3), observedAt.AddSeconds(-2)),
+                new AgentChatMessage("oc_user_2", "user", "older prompt", observedAt.AddSeconds(-1), null),
+                new AgentChatMessage("oc_assistant_2", "assistant", "older response", observedAt, observedAt)
+            ]);
+        var payloadRef = await UploadJsonAsync(
+            client,
+            history,
+            "application/vnd.tradecraft.agent-chat-history+json");
+        var historyEvent = new RunnerEventEnvelope(
+            Id: Ids.New("event"),
+            RunnerId: runnerId,
+            AgentSessionId: session.Id,
+            CommandId: syncCommand.Id,
+            Type: RunnerEventTypes.AgentSessionHistorySynced,
+            PayloadRef: payloadRef,
+            CausationId: syncCommand.Id,
+            CorrelationId: session.Id,
+            CreatedAt: observedAt,
+            AgentId: session.AgentId,
+            SessionId: session.Id);
+        (await client.PostAsJsonAsync(
+            "/api/runner/events",
+            historyEvent,
+            RunnerProtocolJson.Options)).EnsureSuccessStatusCode();
+
+        var turns = await client.GetFromJsonAsync<IReadOnlyCollection<AgentTurnRecord>>(
+            $"/api/agent-sessions/{session.Id}/turns",
+            JsonDefaults.Options);
+        Assert.NotNull(turns);
+        Assert.Equal(2, turns.Count);
+        var enriched = Assert.Single(turns, turn => turn.Id == submitted.Id);
+        Assert.Equal("oc_user_1", enriched.SourceUserMessageId);
+        Assert.Equal("existing response", enriched.Response);
+        Assert.Equal("completed", enriched.Status);
+        var restored = Assert.Single(turns, turn => turn.SourceUserMessageId == "oc_user_2");
+        Assert.StartsWith("turn_history_", restored.Id);
+        Assert.Equal("older response", restored.Response);
+        Assert.Equal(observedAt, restored.HistorySyncedAt);
+    }
+
     private static async Task<AgentSessionRecord> CreateAgentSessionAsync(
         HttpClient client,
         string runnerId = "runner_test")

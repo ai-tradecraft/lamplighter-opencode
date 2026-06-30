@@ -399,6 +399,46 @@ app.MapGet("/api/agent-sessions/{sessionId}/turns", async (
     return Results.Ok(turns);
 });
 
+app.MapPost("/api/agent-sessions/{sessionId}/history/sync", async (
+    string sessionId,
+    AgentSessionStore store,
+    RunnerControlStore runnerStore,
+    IHubContext<AgentSessionHub> hub,
+    CancellationToken cancellationToken) =>
+{
+    var session = await store.GetSessionAsync(sessionId, cancellationToken);
+    if (session is null)
+    {
+        return Results.NotFound();
+    }
+    if (string.IsNullOrWhiteSpace(session.AgentId) || string.IsNullOrWhiteSpace(session.ControllerId))
+    {
+        return Results.Conflict(new { message = "Session is not owned by an active agent controller." });
+    }
+
+    var commandId = Ids.New("cmd");
+    var command = RunnerCommandFactory.Create(
+        sessionId,
+        RunnerCommandTypes.SyncAgentSessionHistory,
+        payloadRef: null,
+        correlationId: sessionId,
+        idempotencyKey: $"history:{sessionId}:{commandId}",
+        runnerId: session.ControllerId,
+        agentId: session.AgentId,
+        sessionId: sessionId,
+        commandId: commandId);
+    await runnerStore.EnqueueCommandAsync(command, cancellationToken);
+    await PublishAsync(
+        store,
+        hub,
+        sessionId,
+        null,
+        "agent_session.history_sync_queued",
+        command,
+        cancellationToken);
+    return Results.Accepted($"/api/runner/commands/{command.Id}", command);
+});
+
 app.MapGet("/api/agent-sessions/{sessionId}/events", async (
     string sessionId,
     AgentSessionStore store,
@@ -547,6 +587,22 @@ static async Task ApplyRunnerEventAsync(
             }
             break;
         }
+
+        case RunnerEventTypes.AgentSessionHistorySynced:
+        {
+            var history = await PayloadJsonAsync<AgentChatHistory>(
+                runnerStore,
+                runnerEvent.PayloadRef,
+                cancellationToken);
+            if (history is not null)
+            {
+                await sessionStore.ReconcileHistoryAsync(history, cancellationToken);
+            }
+            break;
+        }
+
+        case RunnerEventTypes.AgentSessionHistorySyncFailed:
+            break;
 
         case RunnerEventTypes.AgentTurnCompleted:
         {
@@ -1000,6 +1056,70 @@ public sealed class AgentSessionStore
             .OrderBy(turn => turn.CreatedAt)
             .ToArray();
         return Task.FromResult<IReadOnlyCollection<AgentTurnRecord>>(turns);
+    }
+
+    public async Task ReconcileHistoryAsync(AgentChatHistory history, CancellationToken cancellationToken)
+    {
+        var existing = _turns.Values
+            .Where(turn => turn.SessionId == history.AgentSessionId)
+            .OrderBy(turn => turn.CreatedAt)
+            .ToList();
+        var matchedTurnIds = new HashSet<string>(StringComparer.Ordinal);
+
+        for (var index = 0; index < history.Messages.Count;)
+        {
+            var userMessage = history.Messages[index];
+            if (!userMessage.Role.Equals("user", StringComparison.OrdinalIgnoreCase))
+            {
+                index++;
+                continue;
+            }
+
+            var assistantMessages = new List<AgentChatMessage>();
+            index++;
+            while (index < history.Messages.Count
+                && !history.Messages[index].Role.Equals("user", StringComparison.OrdinalIgnoreCase))
+            {
+                if (history.Messages[index].Role.Equals("assistant", StringComparison.OrdinalIgnoreCase))
+                {
+                    assistantMessages.Add(history.Messages[index]);
+                }
+                index++;
+            }
+
+            var turn = existing.FirstOrDefault(candidate =>
+                !matchedTurnIds.Contains(candidate.Id)
+                && candidate.SourceUserMessageId == userMessage.SourceMessageId)
+                ?? existing.FirstOrDefault(candidate =>
+                    !matchedTurnIds.Contains(candidate.Id)
+                    && candidate.SourceUserMessageId is null
+                    && candidate.Prompt == userMessage.Text);
+            turn ??= AgentTurnRecord.FromHistory(history.AgentSessionId, userMessage);
+            matchedTurnIds.Add(turn.Id);
+
+            var response = assistantMessages.Count == 0
+                ? turn.Response
+                : string.Join(
+                    "\n\n",
+                    assistantMessages
+                        .Select(message => message.Text)
+                        .Where(text => !string.IsNullOrWhiteSpace(text)));
+            var completedAt = assistantMessages.Count == 0
+                ? turn.CompletedAt
+                : assistantMessages.Max(message => message.CompletedAt ?? message.CreatedAt);
+            var reconciled = turn with
+            {
+                Prompt = userMessage.Text,
+                Status = assistantMessages.Count > 0 ? "completed" : turn.Status,
+                CreatedAt = userMessage.CreatedAt,
+                CompletedAt = completedAt,
+                Response = response,
+                SourceUserMessageId = userMessage.SourceMessageId,
+                SourceAssistantMessageIds = assistantMessages.Select(message => message.SourceMessageId).ToArray(),
+                HistorySyncedAt = history.ObservedAt
+            };
+            await UpsertTurnAsync(reconciled, cancellationToken);
+        }
     }
 
     public async Task AddEventAsync(RuntimeEventRecord runtimeEvent, CancellationToken cancellationToken)
@@ -1458,16 +1578,17 @@ public static class RunnerCommandFactory
     public static RunnerCommandEnvelope Create(
         string agentSessionId,
         string type,
-        ClaimCheckContentRef payloadRef,
+        ClaimCheckContentRef? payloadRef,
         string correlationId,
         string idempotencyKey,
         string? runnerId = null,
         string? agentId = null,
-        string? sessionId = null)
+        string? sessionId = null,
+        string? commandId = null)
     {
         var now = DateTimeOffset.UtcNow;
         return new RunnerCommandEnvelope(
-            Id: Ids.New("cmd"),
+            Id: commandId ?? Ids.New("cmd"),
             RunnerId: runnerId,
             AgentSessionId: agentSessionId,
             Type: type,
@@ -1685,7 +1806,10 @@ public sealed record AgentTurnRecord(
     string? Response,
     string? FailureSummary,
     string? FailureDetail,
-    HarnessDiagnostics? Diagnostics)
+    HarnessDiagnostics? Diagnostics,
+    string? SourceUserMessageId = null,
+    IReadOnlyList<string>? SourceAssistantMessageIds = null,
+    DateTimeOffset? HistorySyncedAt = null)
 {
     public static AgentTurnRecord Create(string sessionId, string prompt)
     {
@@ -1700,9 +1824,45 @@ public sealed record AgentTurnRecord(
             Response: null,
             FailureSummary: null,
             FailureDetail: null,
-            Diagnostics: null);
+            Diagnostics: null,
+            SourceAssistantMessageIds: []);
+    }
+
+    public static AgentTurnRecord FromHistory(string sessionId, AgentChatMessage userMessage)
+    {
+        var sourceHash = Convert.ToHexString(
+            SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(userMessage.SourceMessageId)))[..24]
+            .ToLowerInvariant();
+        return new AgentTurnRecord(
+            Id: $"turn_history_{sourceHash}",
+            SessionId: sessionId,
+            Type: "prompt_response",
+            Prompt: userMessage.Text,
+            Status: "submitted",
+            CreatedAt: userMessage.CreatedAt,
+            CompletedAt: null,
+            Response: null,
+            FailureSummary: null,
+            FailureDetail: null,
+            Diagnostics: null,
+            SourceUserMessageId: userMessage.SourceMessageId,
+            SourceAssistantMessageIds: []);
     }
 }
+
+public sealed record AgentChatHistory(
+    [property: JsonPropertyName("agent_id")] string AgentId,
+    [property: JsonPropertyName("agent_session_id")] string AgentSessionId,
+    [property: JsonPropertyName("opencode_session_id")] string OpenCodeSessionId,
+    [property: JsonPropertyName("observed_at")] DateTimeOffset ObservedAt,
+    [property: JsonPropertyName("messages")] IReadOnlyList<AgentChatMessage> Messages);
+
+public sealed record AgentChatMessage(
+    [property: JsonPropertyName("source_message_id")] string SourceMessageId,
+    [property: JsonPropertyName("role")] string Role,
+    [property: JsonPropertyName("text")] string Text,
+    [property: JsonPropertyName("created_at")] DateTimeOffset CreatedAt,
+    [property: JsonPropertyName("completed_at")] DateTimeOffset? CompletedAt);
 
 public sealed record RuntimeEventRecord(
     string Id,
