@@ -83,6 +83,9 @@ type Turn = {
   failureSummary?: string;
   failureDetail?: string;
   diagnostics?: Diagnostics;
+  sourceUserMessageId?: string;
+  sourceAssistantMessageIds?: string[];
+  historySyncedAt?: string;
 };
 
 type RuntimeEvent = {
@@ -307,6 +310,12 @@ function App() {
           void loadAgent(session.agentId);
         }
       }
+      if (runtimeEvent.type === "agent_session.history_synced") {
+        void refreshTurns(session.id);
+      }
+      if (runtimeEvent.type === "agent_session.history_sync_failed") {
+        setError("OpenCode chat history could not be refreshed. The last known transcript is still displayed.");
+      }
     };
     [
       "agent_session.preparing",
@@ -314,13 +323,18 @@ function App() {
       "agent_session.created",
       "agent_session.failed",
       "agent_session.cancelled",
+      "agent_session.history_synced",
+      "agent_session.history_sync_failed",
       "agent_turn.submitted",
       "agent_turn.completed",
       "agent_turn.failed"
     ].forEach((name) => connection.on(name, handleEvent));
     connection
       .start()
-      .then(() => connection.invoke("JoinSession", session.id))
+      .then(async () => {
+        await connection.invoke("JoinSession", session.id);
+        await syncHistory(session.id);
+      })
       .catch((err) => setError(String(err)));
     return () => {
       void connection.stop();
@@ -514,6 +528,15 @@ function App() {
     const response = await apiFetch(`/api/agent-sessions/${sessionId}/turns`);
     if (response.ok) {
       setTurns((await response.json()) as Turn[]);
+    }
+  }
+
+  async function syncHistory(sessionId: string) {
+    const response = await apiFetch(`/api/agent-sessions/${sessionId}/history/sync`, {
+      method: "POST"
+    });
+    if (!response.ok) {
+      setError(await responseError(response, "OpenCode chat history synchronization could not be queued"));
     }
   }
 
