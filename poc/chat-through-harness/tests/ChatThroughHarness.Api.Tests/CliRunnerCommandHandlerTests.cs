@@ -154,6 +154,54 @@ public sealed class CliRunnerCommandHandlerTests
     }
 
     [Fact]
+    public async Task SyncSessionHistoryUsesControllerWorkspaceAndPublishesSnapshot()
+    {
+        var history = """
+            {
+              "agent_id": "agent_1",
+              "agent_session_id": "session_1",
+              "opencode_session_id": "oc_session_1",
+              "observed_at": "2026-06-30T00:00:00Z",
+              "messages": [],
+              "raw_messages": []
+            }
+            """;
+        var api = new FakeRunnerApiClient("");
+        var process = new FakeHarnessProcessRunner(
+            new ProcessOutput("get-session-history", 0, history, ""));
+        var controllerWorkspace = NewRuntimeRoot();
+        var handler = new CliRunnerCommandHandler(
+            api,
+            process,
+            Options.Create(new RunnerOptions { RunnerId = "runner_1", ControllerWorkspace = controllerWorkspace }),
+            NullLogger<CliRunnerCommandHandler>.Instance);
+        var command = new RunnerCommandEnvelope(
+            Id: "cmd_1",
+            RunnerId: "runner_1",
+            AgentSessionId: "session_1",
+            Type: RunnerCommandTypes.SyncAgentSessionHistory,
+            Status: RunnerCommandStatuses.Claimed,
+            PayloadRef: null,
+            CorrelationId: "session_1",
+            IdempotencyKey: "history:session_1",
+            CreatedAt: DateTimeOffset.UnixEpoch,
+            AvailableAt: DateTimeOffset.UnixEpoch,
+            Lease: null,
+            AgentId: "agent_1",
+            SessionId: "session_1");
+
+        var result = await handler.HandleAsync(command, CancellationToken.None);
+
+        Assert.Equal(RunnerCommandStatuses.Completed, result.Status);
+        Assert.Contains("get-session-history", process.Arguments);
+        Assert.Contains("agent_1", process.Arguments);
+        Assert.Contains("session_1", process.Arguments);
+        Assert.Contains(controllerWorkspace, process.Arguments);
+        Assert.Equal("application/vnd.tradecraft.agent-chat-history+json", api.Uploads.Single().ContentType);
+        Assert.Equal(RunnerEventTypes.AgentSessionHistorySynced, api.PublishedEvents.Single().Type);
+    }
+
+    [Fact]
     public async Task SubmitTurnCommandPublishesFailedEventForStructuredFailure()
     {
         var contentRef = new ClaimCheckContentRef("tradecraft://content/turn_1", "sha", "application/json", 2);

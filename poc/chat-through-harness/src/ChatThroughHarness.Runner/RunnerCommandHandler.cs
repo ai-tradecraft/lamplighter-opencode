@@ -44,6 +44,7 @@ public sealed class CliRunnerCommandHandler(
             RunnerCommandTypes.CreateAgentSession => await CreateSessionAsync(command, cancellationToken),
             RunnerCommandTypes.PrepareAgentSession => await PrepareSessionAsync(command, cancellationToken),
             RunnerCommandTypes.SubmitAgentTurn => await SubmitTurnAsync(command, cancellationToken),
+            RunnerCommandTypes.SyncAgentSessionHistory => await SyncSessionHistoryAsync(command, cancellationToken),
             RunnerCommandTypes.CancelAgentSession => await CancelSessionAsync(command, cancellationToken),
             _ => RunnerCommandResult.Failed(new RunnerFailure($"Unsupported command type {command.Type}.", null, Retryable: false))
         };
@@ -246,6 +247,30 @@ public sealed class CliRunnerCommandHandler(
                 cancellationToken);
         await PublishEventAsync(command, "agent_session.cancelled", payloadRef, cancellationToken);
         return RunnerCommandResult.Completed(payloadRef);
+    }
+
+    private async Task<RunnerCommandResult> SyncSessionHistoryAsync(
+        RunnerCommandEnvelope command,
+        CancellationToken cancellationToken)
+    {
+        var sessionId = command.SessionId ?? command.AgentSessionId;
+        var output = await processRunner.RunAsync(
+            "uv",
+            [
+                "run", "lamplighter-opencode", "get-session-history",
+                "--agent", RequiredAgentId(command),
+                "--session", sessionId,
+                "--controller-workspace", _options.ControllerWorkspace,
+                "--json"
+            ],
+            cancellationToken);
+        return await CompleteFromProcessAsync(
+            command,
+            output,
+            RunnerEventTypes.AgentSessionHistorySynced,
+            RunnerEventTypes.AgentSessionHistorySyncFailed,
+            "application/vnd.tradecraft.agent-chat-history+json",
+            cancellationToken);
     }
 
     private async Task<RunnerCommandResult> CompleteFromProcessAsync(

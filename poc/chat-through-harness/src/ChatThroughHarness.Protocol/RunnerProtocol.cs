@@ -10,6 +10,7 @@ public static class RunnerCommandTypes
     public const string CreateAgentSession = "agent_session.create";
     public const string PrepareAgentSession = "agent_session.prepare";
     public const string SubmitAgentTurn = "agent_turn.submit";
+    public const string SyncAgentSessionHistory = "agent_session.history.sync";
     public const string CancelAgentSession = "agent_session.cancel";
     public const string RespondToClarification = "agent_clarification.respond";
     public const string SendChatMessage = "agent_chat.message";
@@ -24,6 +25,8 @@ public static class RunnerEventTypes
     public const string AgentSessionCreated = "agent_session.created";
     public const string AgentSessionReady = "agent_session.ready";
     public const string AgentSessionFailed = "agent_session.failed";
+    public const string AgentSessionHistorySynced = "agent_session.history_synced";
+    public const string AgentSessionHistorySyncFailed = "agent_session.history_sync_failed";
     public const string AgentTurnOutputDelta = "agent_turn.output_delta";
     public const string AgentTurnCompleted = "agent_turn.completed";
     public const string AgentTurnFailed = "agent_turn.failed";
