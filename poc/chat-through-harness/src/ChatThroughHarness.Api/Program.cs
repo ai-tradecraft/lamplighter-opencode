@@ -132,8 +132,11 @@ app.MapPost("/api/runner/heartbeat", async (
     await runnerStore.UpsertRunnerHeartbeatAsync(heartbeat, cancellationToken);
     foreach (var agent in heartbeat.Agents)
     {
-        await agentStore.UpsertInventoryAgentAsync(heartbeat.RunnerId, agent, cancellationToken);
-        foreach (var session in agent.Sessions ?? [])
+        var ownershipAccepted = await agentStore.UpsertInventoryAgentAsync(
+            heartbeat.RunnerId,
+            agent,
+            cancellationToken);
+        foreach (var session in ownershipAccepted ? agent.Sessions ?? [] : [])
         {
             await sessionStore.UpsertInventorySessionAsync(
                 heartbeat.RunnerId,
@@ -295,6 +298,11 @@ app.MapPost("/api/agents/{agentId}/sessions", async (
     if (agent.Status is not ("ready" or "planned"))
     {
         return Results.Conflict(new { message = $"Agent {agentId} is {agent.Status}." });
+    }
+    var heartbeat = await runnerStore.GetRunnerHeartbeatAsync(agent.ControllerId, cancellationToken);
+    if (heartbeat is null || !AgentControllerRecord.IsActive(heartbeat))
+    {
+        return Results.Conflict(new { message = $"Agent controller {agent.ControllerId} is not active." });
     }
 
     var session = AgentSessionRecord.CreateForAgent(agent, request);
@@ -877,7 +885,7 @@ public sealed class AgentStore
         return Task.FromResult(agent);
     }
 
-    public async Task UpsertInventoryAgentAsync(
+    public async Task<bool> UpsertInventoryAgentAsync(
         string runnerId,
         RunnerAgentInventoryItem inventory,
         CancellationToken cancellationToken)
@@ -886,6 +894,10 @@ public sealed class AgentStore
         var observed = AgentRecord.FromInventory(runnerId, inventory);
         if (_agents.TryGetValue(agentId, out var existing))
         {
+            if (!existing.ControllerId.Equals(runnerId, StringComparison.Ordinal))
+            {
+                return false;
+            }
             observed = observed with
             {
                 CreatedAt = existing.CreatedAt,
@@ -896,6 +908,7 @@ public sealed class AgentStore
             };
         }
         await UpsertAgentAsync(observed, cancellationToken);
+        return true;
     }
 }
 
