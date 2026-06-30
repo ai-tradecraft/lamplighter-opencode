@@ -78,7 +78,8 @@ public sealed record RunnerHeartbeat(
     [property: JsonPropertyName("status")] string Status,
     [property: JsonPropertyName("active_command_ids")] IReadOnlyList<string> ActiveCommandIds,
     [property: JsonPropertyName("observed_at")] DateTimeOffset ObservedAt,
-    [property: JsonPropertyName("agents")] IReadOnlyList<RunnerAgentInventoryItem> Agents);
+    [property: JsonPropertyName("agents")] IReadOnlyList<RunnerAgentInventoryItem> Agents,
+    [property: JsonPropertyName("protocol_version")] int ProtocolVersion = 2);
 
 public sealed record RunnerAgentInventoryItem(
     [property: JsonPropertyName("agent_session_id")] string AgentSessionId,
@@ -87,6 +88,15 @@ public sealed record RunnerAgentInventoryItem(
     [property: JsonPropertyName("workspace_path")] string WorkspacePath,
     [property: JsonPropertyName("opencode_endpoint")] string? OpenCodeEndpoint,
     [property: JsonPropertyName("opencode_pid")] int? OpenCodePid,
+    [property: JsonPropertyName("observed_at")] DateTimeOffset ObservedAt,
+    [property: JsonPropertyName("agent_id")] string? AgentId = null,
+    [property: JsonPropertyName("sessions")] IReadOnlyList<RunnerAgentSessionInventoryItem>? Sessions = null);
+
+public sealed record RunnerAgentSessionInventoryItem(
+    [property: JsonPropertyName("session_id")] string SessionId,
+    [property: JsonPropertyName("status")] string Status,
+    [property: JsonPropertyName("runtime_path")] string RuntimePath,
+    [property: JsonPropertyName("opencode_session_id")] string? OpenCodeSessionId,
     [property: JsonPropertyName("observed_at")] DateTimeOffset ObservedAt);
 
 public sealed record RunnerCommandEnvelope(
@@ -100,7 +110,9 @@ public sealed record RunnerCommandEnvelope(
     [property: JsonPropertyName("idempotency_key")] string IdempotencyKey,
     [property: JsonPropertyName("created_at")] DateTimeOffset CreatedAt,
     [property: JsonPropertyName("available_at")] DateTimeOffset AvailableAt,
-    [property: JsonPropertyName("lease")] RunnerCommandLease? Lease);
+    [property: JsonPropertyName("lease")] RunnerCommandLease? Lease,
+    [property: JsonPropertyName("agent_id")] string? AgentId = null,
+    [property: JsonPropertyName("session_id")] string? SessionId = null);
 
 public sealed record RunnerCommandLease(
     [property: JsonPropertyName("lease_id")] string LeaseId,
@@ -135,7 +147,9 @@ public sealed record RunnerEventEnvelope(
     [property: JsonPropertyName("payload_ref")] ClaimCheckContentRef? PayloadRef,
     [property: JsonPropertyName("causation_id")] string? CausationId,
     [property: JsonPropertyName("correlation_id")] string CorrelationId,
-    [property: JsonPropertyName("created_at")] DateTimeOffset CreatedAt);
+    [property: JsonPropertyName("created_at")] DateTimeOffset CreatedAt,
+    [property: JsonPropertyName("agent_id")] string? AgentId = null,
+    [property: JsonPropertyName("session_id")] string? SessionId = null);
 
 public sealed record ClaimCheckContentRef(
     [property: JsonPropertyName("uri")] string Uri,

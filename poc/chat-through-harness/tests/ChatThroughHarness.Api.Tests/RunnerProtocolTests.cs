@@ -7,6 +7,69 @@ using Xunit;
 public sealed class RunnerProtocolTests
 {
     [Fact]
+    public void VersionTwoEnvelopeCarriesAgentAndSessionIdentity()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var command = new RunnerCommandEnvelope(
+            Id: "cmd_1",
+            RunnerId: "runner_1",
+            AgentSessionId: "session_1",
+            Type: RunnerCommandTypes.SubmitAgentTurn,
+            Status: RunnerCommandStatuses.Pending,
+            PayloadRef: null,
+            CorrelationId: "turn_1",
+            IdempotencyKey: "turn_1",
+            CreatedAt: now,
+            AvailableAt: now,
+            Lease: null,
+            AgentId: "agent_1",
+            SessionId: "session_1");
+
+        var json = JsonSerializer.Serialize(command, RunnerProtocolJson.Options);
+
+        Assert.Contains("\"agent_id\": \"agent_1\"", json);
+        Assert.Contains("\"session_id\": \"session_1\"", json);
+    }
+
+    [Fact]
+    public void VersionTwoHeartbeatCarriesChildSessions()
+    {
+        var observedAt = DateTimeOffset.UtcNow;
+        var heartbeat = new RunnerHeartbeat(
+            RunnerId: "runner_1",
+            Status: "online",
+            ActiveCommandIds: [],
+            ObservedAt: observedAt,
+            Agents:
+            [
+                new RunnerAgentInventoryItem(
+                    AgentSessionId: "session_legacy",
+                    Status: "ready",
+                    RuntimePath: "/runtime/agent_1",
+                    WorkspacePath: "/workspace/agent_1",
+                    OpenCodeEndpoint: "http://127.0.0.1:4096",
+                    OpenCodePid: 123,
+                    ObservedAt: observedAt,
+                    AgentId: "agent_1",
+                    Sessions:
+                    [
+                        new RunnerAgentSessionInventoryItem(
+                            "session_1",
+                            "ready",
+                            "/runtime/agent_1/sessions/session_1",
+                            "opencode_1",
+                            observedAt)
+                    ])
+            ]);
+
+        var json = JsonSerializer.Serialize(heartbeat, RunnerProtocolJson.Options);
+
+        Assert.Contains("\"protocol_version\": 2", json);
+        Assert.Contains("\"agent_id\": \"agent_1\"", json);
+        Assert.Contains("\"session_id\": \"session_1\"", json);
+    }
+
+    [Fact]
     public void CommandEnvelopeSerializesAsSnakeCaseContract()
     {
         var contentRef = new ClaimCheckContentRef(
