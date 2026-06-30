@@ -1,12 +1,15 @@
 """Agent lifecycle command tests."""
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from typer.testing import CliRunner
 
 from lamplighter_opencode.cli import app
+from lamplighter_opencode.contracts.models import AgentChatSessionSpec
 from lamplighter_opencode.runtime.layout import agent_layout, agent_session_layout
+from lamplighter_opencode.runtime.workspace import create_agent_session
 
 runner = CliRunner()
 
@@ -186,6 +189,44 @@ def test_agent_owns_multiple_isolated_sessions(tmp_path: Path, monkeypatch) -> N
     assert json.loads(first.metadata_path.read_text(encoding="utf-8"))["status"] == "cancelled"
     assert json.loads(second.metadata_path.read_text(encoding="utf-8"))["status"] == "ready"
     assert json.loads(agent_layout(controller_workspace, "agent_one").metadata_path.read_text())["status"] == "planned"
+
+
+def test_duplicate_concurrent_session_creation_is_idempotent(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("LAMPLIGHTER_OPENCODE_USE_REAL_BACKEND", raising=False)
+    controller_workspace = tmp_path / "controller"
+    spec_path = tmp_path / "agent-spec.json"
+    spec_path.write_text(json.dumps(_agent_spec()), encoding="utf-8")
+    runner.invoke(
+        app,
+        [
+            "prepare-agent",
+            "--spec",
+            str(spec_path),
+            "--controller-workspace",
+            str(controller_workspace),
+            "--skip-backend-env-check",
+        ],
+    )
+    runner.invoke(
+        app,
+        [
+            "start-agent",
+            "--agent",
+            "agent_one",
+            "--controller-workspace",
+            str(controller_workspace),
+            "--dry-run",
+        ],
+    )
+    spec = AgentChatSessionSpec.from_dict(_session_spec("session_same"))
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        layouts = list(executor.map(lambda _: create_agent_session(spec, controller_workspace), range(2)))
+
+    assert layouts[0].root == layouts[1].root
+    metadata = json.loads(layouts[0].metadata_path.read_text(encoding="utf-8"))
+    assert metadata["status"] == "ready"
+    assert not (agent_layout(controller_workspace, "agent_one").runtime_dir / ".lifecycle.lock").exists()
 
 
 def _agent_spec() -> dict[str, object]:

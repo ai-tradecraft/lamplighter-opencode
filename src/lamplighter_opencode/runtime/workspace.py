@@ -13,7 +13,8 @@ import urllib.error
 import urllib.request
 import uuid
 from base64 import b64encode
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -95,40 +96,43 @@ def create_agent_session(
     if not agent.metadata_path.exists():
         raise ValueError(f"Agent is not prepared: {spec.agent_id}")
 
-    layout = materialize_agent_session_layout(controller_workspace, spec.agent_id, spec.session_id)
-    server = _read_json(agent.server_metadata_path)
-    if real_backend_enabled():
-        if _metadata_string(server, "status") != "ready":
-            raise OpenCodeServerError(f"OpenCode server is not ready for {spec.agent_id}")
-        session = _request_json(
-            server,
-            "POST",
-            "/session",
-            query={"directory": str(agent.workspace_dir)},
-            body={"title": f"Lamplighter {spec.session_id}"},
-        )
-        opencode_session_id = _metadata_string(session, "id")
-    else:
-        opencode_session_id = f"fake_{uuid.uuid4().hex}"
+    with _agent_lifecycle_lock(agent.runtime_dir):
+        layout = materialize_agent_session_layout(controller_workspace, spec.agent_id, spec.session_id)
+        if layout.metadata_path.exists():
+            return layout
+        server = _read_json(agent.server_metadata_path)
+        if real_backend_enabled():
+            if _metadata_string(server, "status") != "ready":
+                raise OpenCodeServerError(f"OpenCode server is not ready for {spec.agent_id}")
+            session = _request_json(
+                server,
+                "POST",
+                "/session",
+                query={"directory": str(agent.workspace_dir)},
+                body={"title": f"Lamplighter {spec.session_id}"},
+            )
+            opencode_session_id = _metadata_string(session, "id")
+        else:
+            opencode_session_id = f"fake_{uuid.uuid4().hex}"
 
-    _write_json(
-        layout.metadata_path,
-        {
-            **spec_value,
-            "status": "ready",
-            "opencode_session_id": opencode_session_id,
-            "created_at": datetime.now(UTC).isoformat(),
-        },
-    )
-    _write_json(layout.context_path, spec.context_package)
-    append_runtime_event(
-        layout.events_path,
-        RuntimeEvent(
-            event_type="agent_session.created",
-            agent_session_id=spec.session_id,
-            payload={"agent_id": spec.agent_id, "opencode_session_id": opencode_session_id},
-        ),
-    )
+        _write_json(
+            layout.metadata_path,
+            {
+                **spec_value,
+                "status": "ready",
+                "opencode_session_id": opencode_session_id,
+                "created_at": datetime.now(UTC).isoformat(),
+            },
+        )
+        _write_json(layout.context_path, spec.context_package)
+        append_runtime_event(
+            layout.events_path,
+            RuntimeEvent(
+                event_type="agent_session.created",
+                agent_session_id=spec.session_id,
+                payload={"agent_id": spec.agent_id, "opencode_session_id": opencode_session_id},
+            ),
+        )
     return layout
 
 
@@ -540,37 +544,43 @@ def start_agent(
     dry_run: bool = False,
 ) -> dict[str, Any]:
     """Start the single OpenCode server owned by an agent."""
-    metadata = start_opencode_server(
-        layout.root,
-        host=host,
-        port=port,
-        dry_run=dry_run,
-        metadata_path=layout.server_metadata_path,
-        logs_dir=layout.logs_dir / "opencode",
-    )
-    agent = _read_json(layout.metadata_path)
-    agent["status"] = metadata["status"]
-    _write_json(layout.metadata_path, agent)
-    return metadata
+    with _agent_lifecycle_lock(layout.runtime_dir):
+        if layout.server_metadata_path.exists():
+            existing = _read_json(layout.server_metadata_path)
+            if existing.get("status") in {"planned", "starting", "ready"}:
+                return existing
+        metadata = start_opencode_server(
+            layout.root,
+            host=host,
+            port=port,
+            dry_run=dry_run,
+            metadata_path=layout.server_metadata_path,
+            logs_dir=layout.logs_dir / "opencode",
+        )
+        agent = _read_json(layout.metadata_path)
+        agent["status"] = metadata["status"]
+        _write_json(layout.metadata_path, agent)
+        return metadata
 
 
 def stop_agent(layout: AgentLayout) -> dict[str, Any]:
     """Stop an agent's OpenCode server while retaining its workspace."""
-    metadata = _read_json(layout.server_metadata_path)
-    pid = metadata.get("pid")
-    if isinstance(pid, int):
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-    metadata["status"] = "stopped"
-    metadata["ended_at"] = datetime.now(UTC).isoformat()
-    _write_json(layout.server_metadata_path, metadata)
+    with _agent_lifecycle_lock(layout.runtime_dir):
+        metadata = _read_json(layout.server_metadata_path)
+        pid = metadata.get("pid")
+        if isinstance(pid, int):
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        metadata["status"] = "stopped"
+        metadata["ended_at"] = datetime.now(UTC).isoformat()
+        _write_json(layout.server_metadata_path, metadata)
 
-    agent = _read_json(layout.metadata_path)
-    agent["status"] = "stopped"
-    _write_json(layout.metadata_path, agent)
-    return metadata
+        agent = _read_json(layout.metadata_path)
+        agent["status"] = "stopped"
+        _write_json(layout.metadata_path, agent)
+        return metadata
 
 
 def opencode_serve_command(root: Path, host: str, port: int, mode: str | None = None) -> list[str]:
@@ -1085,6 +1095,34 @@ def _observed_command(command: list[str]) -> str:
 
 def _write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as output:
-        json.dump(value, output, indent=2, sort_keys=True)
-        output.write("\n")
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("x", encoding="utf-8") as output:
+            json.dump(value, output, indent=2, sort_keys=True)
+            output.write("\n")
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+@contextmanager
+def _agent_lifecycle_lock(runtime_dir: Path, timeout_seconds: float = 10) -> Iterator[None]:
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = runtime_dir / ".lifecycle.lock"
+    deadline = time.monotonic() + timeout_seconds
+    descriptor: int | None = None
+    while descriptor is None:
+        try:
+            descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"Timed out waiting for agent lifecycle lock: {lock_path}") from None
+            time.sleep(0.02)
+    try:
+        os.write(descriptor, f"{os.getpid()}\n".encode())
+        yield
+    finally:
+        os.close(descriptor)
+        lock_path.unlink(missing_ok=True)
