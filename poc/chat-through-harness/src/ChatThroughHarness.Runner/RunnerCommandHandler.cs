@@ -1,29 +1,32 @@
 using System.Diagnostics;
+using System.Collections.Concurrent;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
-using ChatThroughHarness.Protocol;
+using ChatThroughHarness.Protocol.V1;
 
 namespace ChatThroughHarness.Runner;
 
 public interface IRunnerCommandHandler
 {
-    Task<RunnerCommandResult> HandleAsync(RunnerCommandEnvelope command, CancellationToken cancellationToken);
+    Task<RunnerCommandResult> HandleAsync(
+        ControllerCommand command,
+        CancellationToken cancellationToken);
 }
 
 public sealed record RunnerCommandResult(
-    string Status,
-    ClaimCheckContentRef? ResultRef,
-    RunnerFailure? Failure)
+    string DeliveryStatus,
+    ContentReference? ResultRef,
+    ProtocolError? Error)
 {
-    public static RunnerCommandResult Completed(ClaimCheckContentRef? resultRef = null)
+    public static RunnerCommandResult Completed(ContentReference? resultRef = null)
     {
-        return new RunnerCommandResult(RunnerCommandStatuses.Completed, resultRef, null);
+        return new RunnerCommandResult(CommandDeliveryStatuses.Completed, resultRef, null);
     }
 
-    public static RunnerCommandResult Failed(RunnerFailure failure)
+    public static RunnerCommandResult Failed(ProtocolError error)
     {
-        return new RunnerCommandResult(RunnerCommandStatuses.Failed, null, failure);
+        return new RunnerCommandResult(CommandDeliveryStatuses.Failed, null, error);
     }
 }
 
@@ -34,24 +37,36 @@ public sealed class CliRunnerCommandHandler(
     ILogger<CliRunnerCommandHandler> logger) : IRunnerCommandHandler
 {
     private readonly RunnerOptions _options = options.Value;
+    private readonly ConcurrentDictionary<string, long> _aggregateSequences = new();
 
-    public async Task<RunnerCommandResult> HandleAsync(RunnerCommandEnvelope command, CancellationToken cancellationToken)
+    public async Task<RunnerCommandResult> HandleAsync(
+        ControllerCommand command,
+        CancellationToken cancellationToken)
     {
-        return command.Type switch
+        return command.CommandType switch
         {
-            RunnerCommandTypes.PrepareAgent => await PrepareAgentAsync(command, cancellationToken),
-            RunnerCommandTypes.StopAgent => await StopAgentAsync(command, cancellationToken),
-            RunnerCommandTypes.CreateAgentSession => await CreateSessionAsync(command, cancellationToken),
-            RunnerCommandTypes.PrepareAgentSession => await PrepareSessionAsync(command, cancellationToken),
-            RunnerCommandTypes.SubmitAgentTurn => await SubmitTurnAsync(command, cancellationToken),
-            RunnerCommandTypes.SyncAgentSessionHistory => await SyncSessionHistoryAsync(command, cancellationToken),
-            RunnerCommandTypes.CancelAgentSession => await CancelSessionAsync(command, cancellationToken),
-            _ => RunnerCommandResult.Failed(new RunnerFailure($"Unsupported command type {command.Type}.", null, Retryable: false))
+            ControllerCommandTypes.StartAgentRuntime =>
+                await PrepareAgentAsync(command, cancellationToken),
+            ControllerCommandTypes.StopAgentRuntime =>
+                await StopAgentAsync(command, cancellationToken),
+            ControllerCommandTypes.CreateAgentSession =>
+                await CreateSessionAsync(command, cancellationToken),
+            ControllerCommandTypes.StartInvocation =>
+                await SubmitTurnAsync(command, cancellationToken),
+            ControllerCommandTypes.SynchronizeSessionHistory =>
+                await SyncSessionHistoryAsync(command, cancellationToken),
+            ControllerCommandTypes.CloseAgentSession =>
+                await CancelSessionAsync(command, cancellationToken),
+            _ => RunnerCommandResult.Failed(new ProtocolError(
+                Code: "unsupported_controller_command",
+                Classification: ProtocolErrorClassifications.UnsupportedOperation,
+                Summary: $"Unsupported command type {command.CommandType}.",
+                Retryable: false))
         };
     }
 
     private async Task<RunnerCommandResult> PrepareAgentAsync(
-        RunnerCommandEnvelope command,
+        ControllerCommand command,
         CancellationToken cancellationToken)
     {
         var agentId = RequiredAgentId(command);
@@ -70,8 +85,8 @@ public sealed class CliRunnerCommandHandler(
             return await CompleteFromProcessAsync(
                 command,
                 prepareOutput,
-                RunnerEventTypes.AgentReady,
-                RunnerEventTypes.AgentFailed,
+                ControllerEventTypes.AgentRuntimeReady,
+                ControllerEventTypes.AgentRuntimeLost,
                 "application/vnd.tradecraft.prepare-agent-result+json",
                 cancellationToken);
         }
@@ -88,14 +103,14 @@ public sealed class CliRunnerCommandHandler(
         return await CompleteFromProcessAsync(
             command,
             startOutput,
-            RunnerEventTypes.AgentReady,
-            RunnerEventTypes.AgentFailed,
+            ControllerEventTypes.AgentRuntimeReady,
+            ControllerEventTypes.AgentRuntimeLost,
             "application/vnd.tradecraft.start-agent-result+json",
             cancellationToken);
     }
 
     private async Task<RunnerCommandResult> CreateSessionAsync(
-        RunnerCommandEnvelope command,
+        ControllerCommand command,
         CancellationToken cancellationToken)
     {
         var agentId = RequiredAgentId(command);
@@ -113,14 +128,14 @@ public sealed class CliRunnerCommandHandler(
         return await CompleteFromProcessAsync(
             command,
             output,
-            RunnerEventTypes.AgentSessionCreated,
-            RunnerEventTypes.AgentSessionFailed,
+            ControllerEventTypes.AgentSessionCreated,
+            ControllerEventTypes.AgentSessionClosed,
             "application/vnd.tradecraft.create-session-result+json",
             cancellationToken);
     }
 
     private async Task<RunnerCommandResult> StopAgentAsync(
-        RunnerCommandEnvelope command,
+        ControllerCommand command,
         CancellationToken cancellationToken)
     {
         var output = await processRunner.RunAsync(
@@ -135,18 +150,19 @@ public sealed class CliRunnerCommandHandler(
         return await CompleteFromProcessAsync(
             command,
             output,
-            RunnerEventTypes.AgentStopped,
-            RunnerEventTypes.AgentFailed,
+            ControllerEventTypes.AgentRuntimeStopped,
+            ControllerEventTypes.AgentRuntimeLost,
             "application/vnd.tradecraft.stop-agent-result+json",
             cancellationToken);
     }
 
     private async Task<RunnerCommandResult> PrepareSessionAsync(
-        RunnerCommandEnvelope command,
+        ControllerCommand command,
         CancellationToken cancellationToken)
     {
         var payload = await DownloadPayloadAsync(command, cancellationToken);
-        var sessionRoot = SessionRoot(command.AgentSessionId);
+        var sessionId = RequiredAgentSessionId(command);
+        var sessionRoot = SessionRoot(sessionId);
         Directory.CreateDirectory(sessionRoot);
         var specPath = Path.Combine(sessionRoot, "agent-session-spec.json");
         await File.WriteAllTextAsync(specPath, payload, cancellationToken);
@@ -161,37 +177,38 @@ public sealed class CliRunnerCommandHandler(
             return await CompleteFromProcessAsync(
                 command,
                 prepareOutput,
-                successEventType: RunnerEventTypes.AgentSessionReady,
-                failureEventType: RunnerEventTypes.AgentSessionFailed,
+                successEventType: ControllerEventTypes.AgentSessionCreated,
+                failureEventType: ControllerEventTypes.AgentSessionClosed,
                 successContentType: "application/vnd.tradecraft.prepare-session-result+json",
                 cancellationToken);
         }
 
         var startOutput = await processRunner.RunAsync(
             "uv",
-            ["run", "lamplighter-opencode", "start-session", "--session", command.AgentSessionId, "--runtime-root", _options.ControllerWorkspace, "--json"],
+            ["run", "lamplighter-opencode", "start-session", "--session", sessionId, "--runtime-root", _options.ControllerWorkspace, "--json"],
             cancellationToken);
 
         return await CompleteFromProcessAsync(
             command,
             startOutput,
-            successEventType: RunnerEventTypes.AgentSessionReady,
-            failureEventType: RunnerEventTypes.AgentSessionFailed,
+            successEventType: ControllerEventTypes.AgentSessionCreated,
+            failureEventType: ControllerEventTypes.AgentSessionClosed,
             successContentType: "application/vnd.tradecraft.start-session-result+json",
             cancellationToken);
     }
 
     private async Task<RunnerCommandResult> SubmitTurnAsync(
-        RunnerCommandEnvelope command,
+        ControllerCommand command,
         CancellationToken cancellationToken)
     {
         var payload = await DownloadPayloadAsync(command, cancellationToken);
-        var sessionId = command.SessionId ?? command.AgentSessionId;
-        var sessionRoot = command.AgentId is null
+        var sessionId = RequiredAgentSessionId(command);
+        var runtimeId = command.Target.RuntimeId;
+        var sessionRoot = runtimeId is null
             ? SessionRoot(sessionId)
-            : AgentSessionRoot(command.AgentId, sessionId);
+            : AgentSessionRoot(runtimeId, sessionId);
         Directory.CreateDirectory(sessionRoot);
-        var requestPath = Path.Combine(sessionRoot, $"{command.CorrelationId}.request.json");
+        var requestPath = Path.Combine(sessionRoot, $"{InvocationId(command)}.request.json");
         await File.WriteAllTextAsync(requestPath, payload, cancellationToken);
 
         var arguments = new List<string>
@@ -200,10 +217,10 @@ public sealed class CliRunnerCommandHandler(
             "--session", sessionId,
             "--request", requestPath
         };
-        if (command.AgentId is not null)
+        if (runtimeId is not null)
         {
             arguments.AddRange([
-                "--agent", command.AgentId,
+                "--agent", runtimeId,
                 "--controller-workspace", _options.ControllerWorkspace
             ]);
         }
@@ -214,18 +231,22 @@ public sealed class CliRunnerCommandHandler(
     }
 
     private async Task<RunnerCommandResult> CancelSessionAsync(
-        RunnerCommandEnvelope command,
+        ControllerCommand command,
         CancellationToken cancellationToken)
     {
-        var sessionId = command.SessionId ?? command.AgentSessionId;
-        logger.LogInformation("Received cancel command {CommandId} for session {SessionId}.", command.Id, sessionId);
-        if (command.AgentId is not null)
+        var sessionId = RequiredAgentSessionId(command);
+        var runtimeId = command.Target.RuntimeId;
+        logger.LogInformation(
+            "Received close command {CommandId} for session {SessionId}.",
+            command.CommandId,
+            sessionId);
+        if (runtimeId is not null)
         {
             var output = await processRunner.RunAsync(
                 "uv",
                 [
                     "run", "lamplighter-opencode", "cancel-session",
-                    "--agent", command.AgentId,
+                    "--agent", runtimeId,
                     "--session", sessionId,
                     "--controller-workspace", _options.ControllerWorkspace,
                     "--json"
@@ -234,8 +255,8 @@ public sealed class CliRunnerCommandHandler(
             return await CompleteFromProcessAsync(
                 command,
                 output,
-                "agent_session.cancelled",
-                RunnerEventTypes.AgentSessionFailed,
+                ControllerEventTypes.AgentSessionClosed,
+                ControllerEventTypes.AgentSessionClosed,
                 "application/vnd.tradecraft.cancel-session-result+json",
                 cancellationToken);
         }
@@ -245,15 +266,19 @@ public sealed class CliRunnerCommandHandler(
                 await apiClient.DownloadContentStringAsync(command.PayloadRef, cancellationToken),
                 command.PayloadRef.ContentType,
                 cancellationToken);
-        await PublishEventAsync(command, "agent_session.cancelled", payloadRef, cancellationToken);
+        await PublishEventAsync(
+            command,
+            ControllerEventTypes.AgentSessionClosed,
+            payloadRef,
+            cancellationToken);
         return RunnerCommandResult.Completed(payloadRef);
     }
 
     private async Task<RunnerCommandResult> SyncSessionHistoryAsync(
-        RunnerCommandEnvelope command,
+        ControllerCommand command,
         CancellationToken cancellationToken)
     {
-        var sessionId = command.SessionId ?? command.AgentSessionId;
+        var sessionId = RequiredAgentSessionId(command);
         var output = await processRunner.RunAsync(
             "uv",
             [
@@ -267,14 +292,14 @@ public sealed class CliRunnerCommandHandler(
         return await CompleteFromProcessAsync(
             command,
             output,
-            RunnerEventTypes.AgentSessionHistorySynced,
-            RunnerEventTypes.AgentSessionHistorySyncFailed,
+            ControllerEventTypes.AgentSessionHistorySynchronized,
+            ControllerEventTypes.AgentSessionHistorySynchronizationFailed,
             "application/vnd.tradecraft.agent-chat-history+json",
             cancellationToken);
     }
 
     private async Task<RunnerCommandResult> CompleteFromProcessAsync(
-        RunnerCommandEnvelope command,
+        ControllerCommand command,
         ProcessOutput output,
         string successEventType,
         string failureEventType,
@@ -292,7 +317,7 @@ public sealed class CliRunnerCommandHandler(
     }
 
     private async Task<RunnerCommandResult> CompleteTurnFromProcessAsync(
-        RunnerCommandEnvelope command,
+        ControllerCommand command,
         ProcessOutput output,
         CancellationToken cancellationToken)
     {
@@ -301,7 +326,7 @@ public sealed class CliRunnerCommandHandler(
             return await CompleteProcessFailureAsync(
                 command,
                 output,
-                RunnerEventTypes.AgentTurnFailed,
+                ControllerEventTypes.OutcomeReported,
                 cancellationToken);
         }
 
@@ -324,7 +349,7 @@ public sealed class CliRunnerCommandHandler(
             return await CompleteProcessFailureAsync(
                 command,
                 invalidOutput,
-                RunnerEventTypes.AgentTurnFailed,
+                ControllerEventTypes.OutcomeReported,
                 cancellationToken);
         }
 
@@ -338,7 +363,7 @@ public sealed class CliRunnerCommandHandler(
             return await CompleteProcessFailureAsync(
                 command,
                 invalidOutput,
-                RunnerEventTypes.AgentTurnFailed,
+                ControllerEventTypes.OutcomeReported,
                 cancellationToken);
         }
 
@@ -346,15 +371,16 @@ public sealed class CliRunnerCommandHandler(
             output.Stdout,
             "application/vnd.tradecraft.agent-turn-result+json",
             cancellationToken);
-        var eventType = resultStatus.Equals("completed", StringComparison.OrdinalIgnoreCase)
-            ? RunnerEventTypes.AgentTurnCompleted
-            : RunnerEventTypes.AgentTurnFailed;
-        await PublishEventAsync(command, eventType, resultRef, cancellationToken);
+        await PublishEventAsync(
+            command,
+            ControllerEventTypes.OutcomeReported,
+            resultRef,
+            cancellationToken);
         return RunnerCommandResult.Completed(resultRef);
     }
 
     private async Task<RunnerCommandResult> CompleteProcessFailureAsync(
-        RunnerCommandEnvelope command,
+        ControllerCommand command,
         ProcessOutput output,
         string failureEventType,
         CancellationToken cancellationToken)
@@ -373,45 +399,62 @@ public sealed class CliRunnerCommandHandler(
             diagnostics,
             "text/plain",
             cancellationToken);
-        var failure = new RunnerFailure(
+        var failure = new ProtocolError(
+            Code: "runtime_adapter_command_failed",
+            Classification: ProtocolErrorClassifications.AdapterFailure,
             Summary: $"Harness command failed with exit code {output.ExitCode}.",
-            DetailRef: failureRef,
-            Retryable: false);
+            Retryable: false,
+            DiagnosticRef: failureRef);
         await PublishEventAsync(command, failureEventType, failureRef, cancellationToken);
         return RunnerCommandResult.Failed(failure);
     }
 
     private async Task<string> DownloadPayloadAsync(
-        RunnerCommandEnvelope command,
+        ControllerCommand command,
         CancellationToken cancellationToken)
     {
         if (command.PayloadRef is null)
         {
-            throw new InvalidOperationException($"Command {command.Id} does not have a payload_ref.");
+            throw new InvalidOperationException(
+                $"Command {command.CommandId} does not have a payload_ref.");
         }
 
         return await apiClient.DownloadContentStringAsync(command.PayloadRef, cancellationToken);
     }
 
     private async Task PublishEventAsync(
-        RunnerCommandEnvelope command,
+        ControllerCommand command,
         string eventType,
-        ClaimCheckContentRef? payloadRef,
+        ContentReference? payloadRef,
         CancellationToken cancellationToken)
     {
+        var aggregate = Aggregate(command);
+        var sequence = _aggregateSequences.AddOrUpdate(
+            $"{aggregate.Type}:{aggregate.Id}",
+            1,
+            static (_, current) => current + 1);
         await apiClient.PublishEventAsync(
-            new RunnerEventEnvelope(
-                Id: $"event_{Guid.NewGuid():N}",
-                RunnerId: _options.RunnerId,
-                AgentSessionId: command.AgentSessionId,
-                CommandId: command.Id,
-                Type: eventType,
+            new ControllerEvent(
+                MessageType: ControllerMessageTypes.Event,
+                ProtocolVersion: ControllerProtocolVersions.Protocol,
+                SchemaVersion: ControllerProtocolVersions.Schema,
+                EventId: $"event_{Guid.NewGuid():N}",
+                ControllerId: _options.RunnerId,
+                EventType: eventType,
+                Aggregate: aggregate,
+                Sequence: sequence,
+                OccurredAt: DateTimeOffset.UtcNow,
+                PayloadSchemaVersion: ControllerProtocolVersions.Schema,
+                Target: command.Target,
+                Correlation: command.Correlation with
+                {
+                    CommandId = command.CommandId,
+                    CausationId = command.CommandId
+                },
                 PayloadRef: payloadRef,
-                CausationId: command.Id,
-                CorrelationId: command.CorrelationId,
-                CreatedAt: DateTimeOffset.UtcNow,
-                AgentId: command.AgentId,
-                SessionId: command.SessionId),
+                Payload: payloadRef is null
+                    ? JsonSerializer.SerializeToElement(new { })
+                    : null),
             cancellationToken);
     }
 
@@ -432,23 +475,63 @@ public sealed class CliRunnerCommandHandler(
     }
 
     private async Task<string> WriteCommandPayloadAsync(
-        RunnerCommandEnvelope command,
+        ControllerCommand command,
         string fileName,
         CancellationToken cancellationToken)
     {
         var payload = await DownloadPayloadAsync(command, cancellationToken);
-        var commandRoot = Path.Combine(_options.ControllerWorkspace, "commands", SafeIdentifier(command.Id, "cmd_"));
+        var commandRoot = Path.Combine(
+            _options.ControllerWorkspace,
+            "commands",
+            SafeIdentifier(command.CommandId, "cmd_"));
         Directory.CreateDirectory(commandRoot);
         var path = Path.Combine(commandRoot, fileName);
         await File.WriteAllTextAsync(path, payload, cancellationToken);
         return path;
     }
 
-    private static string RequiredAgentId(RunnerCommandEnvelope command)
+    private static string RequiredAgentId(ControllerCommand command)
     {
         return SafeIdentifier(
-            command.AgentId ?? throw new InvalidOperationException($"Command {command.Id} does not have agent_id."),
+            command.Target.RuntimeId
+            ?? throw new InvalidOperationException(
+                $"Command {command.CommandId} does not target a runtime."),
             "agent_");
+    }
+
+    private static string RequiredAgentSessionId(ControllerCommand command)
+    {
+        return command.Target.AgentSessionId
+               ?? throw new InvalidOperationException(
+                   $"Command {command.CommandId} does not target an agent session.");
+    }
+
+    private static string InvocationId(ControllerCommand command)
+    {
+        return command.Target.InvocationId
+               ?? command.Correlation.InvocationId
+               ?? command.Correlation.CorrelationId
+               ?? command.CommandId;
+    }
+
+    private static AggregateReference Aggregate(ControllerCommand command)
+    {
+        if (command.Target.InvocationId is { } invocationId)
+        {
+            return new AggregateReference("invocation", invocationId);
+        }
+
+        if (command.Target.AgentSessionId is { } sessionId)
+        {
+            return new AggregateReference("agent_session", sessionId);
+        }
+
+        if (command.Target.RuntimeId is { } runtimeId)
+        {
+            return new AggregateReference("runtime", runtimeId);
+        }
+
+        return new AggregateReference("controller", command.Target.ControllerId ?? "controller_unknown");
     }
 
     private static string SafeIdentifier(string value, string prefix)

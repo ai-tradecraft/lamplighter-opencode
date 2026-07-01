@@ -1,4 +1,4 @@
-using ChatThroughHarness.Protocol;
+using ChatThroughHarness.Protocol.V1;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -46,15 +46,18 @@ public sealed class RunnerCommandLoop(
         logger.LogInformation("Runner command loop stopped.");
     }
 
-    private async Task ProcessCommandAsync(RunnerCommandEnvelope command, CancellationToken cancellationToken)
+    private async Task ProcessCommandAsync(ControllerCommand command, CancellationToken cancellationToken)
     {
-        logger.LogInformation("Claiming command {CommandId} of type {CommandType}.", command.Id, command.Type);
-        var claimed = await apiClient.ClaimCommandAsync(command, cancellationToken);
+        logger.LogInformation(
+            "Acknowledging command {CommandId} of type {CommandType}.",
+            command.CommandId,
+            command.CommandType);
+        var acknowledged = await apiClient.AcknowledgeCommandAsync(command, cancellationToken);
 
         RunnerCommandResult result;
         try
         {
-            result = await commandHandler.HandleAsync(claimed, cancellationToken);
+            result = await commandHandler.HandleAsync(acknowledged, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -62,14 +65,21 @@ public sealed class RunnerCommandLoop(
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Command {CommandId} failed in handler.", claimed.Id);
-            result = RunnerCommandResult.Failed(new RunnerFailure(
+            logger.LogError(
+                ex,
+                "Command {CommandId} failed in handler.",
+                acknowledged.CommandId);
+            result = RunnerCommandResult.Failed(new ProtocolError(
+                Code: "controller_handler_failed",
+                Classification: ProtocolErrorClassifications.AdapterFailure,
                 Summary: ex.Message,
-                DetailRef: null,
                 Retryable: false));
         }
 
-        await apiClient.CompleteCommandAsync(claimed, result, cancellationToken);
-        logger.LogInformation("Completed command {CommandId} with status {Status}.", claimed.Id, result.Status);
+        await apiClient.CompleteCommandAsync(acknowledged, result, cancellationToken);
+        logger.LogInformation(
+            "Completed command {CommandId} with delivery status {DeliveryStatus}.",
+            acknowledged.CommandId,
+            result.DeliveryStatus);
     }
 }

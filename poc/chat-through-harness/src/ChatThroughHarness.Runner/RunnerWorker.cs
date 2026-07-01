@@ -1,4 +1,6 @@
-using ChatThroughHarness.Protocol;
+using System.Collections.Immutable;
+using System.Text.Json;
+using ChatThroughHarness.Protocol.V1;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -44,16 +46,67 @@ public sealed class RunnerWorker(
             DateTimeOffset.UtcNow,
             healthProbe,
             cancellationToken);
-        var heartbeat = new RunnerHeartbeat(
-            RunnerId: _options.RunnerId,
+        var heartbeat = new ControllerHeartbeat(
+            MessageType: ControllerMessageTypes.Heartbeat,
+            ProtocolVersion: ControllerProtocolVersions.Protocol,
+            SchemaVersion: ControllerProtocolVersions.Schema,
+            ControllerId: _options.RunnerId,
             Status: "online",
-            ActiveCommandIds: [],
             ObservedAt: DateTimeOffset.UtcNow,
-            Agents: agents);
+            ActiveCommandIds: [],
+            Inventory: new ControllerInventory(
+                Runtimes: agents.Select(ToRuntimeResource).ToImmutableArray(),
+                Sessions: agents
+                    .SelectMany(ToSessionResources)
+                    .ToImmutableArray()));
 
         await apiClient.UpsertHeartbeatAsync(heartbeat, cancellationToken);
         logger.LogInformation(
             "Runner heartbeat published with {AgentCount} local agents.",
             agents.Count);
+    }
+
+    private AgentRuntimeResource ToRuntimeResource(RunnerAgentInventoryItem agent)
+    {
+        return new AgentRuntimeResource(
+            DocumentType: "agent_runtime",
+            RuntimeId: agent.AgentId ?? agent.AgentSessionId,
+            ControllerId: _options.RunnerId,
+            Status: agent.Status,
+            AdapterKind: "opencode",
+            DeploymentMode: "local_process",
+            CreatedAt: agent.ObservedAt,
+            UpdatedAt: agent.ObservedAt,
+            Extensions: ImmutableDictionary<string, JsonElement>.Empty.Add(
+                "tradecraft.poc",
+                JsonSerializer.SerializeToElement(new
+                {
+                    agent_session_id = agent.AgentSessionId,
+                    runtime_path = agent.RuntimePath,
+                    workspace_path = agent.WorkspacePath,
+                    opencode_endpoint = agent.OpenCodeEndpoint,
+                    opencode_pid = agent.OpenCodePid
+                })));
+    }
+
+    private static IEnumerable<AgentSessionResource> ToSessionResources(
+        RunnerAgentInventoryItem agent)
+    {
+        return (agent.Sessions ?? [])
+            .Select(session => new AgentSessionResource(
+                DocumentType: "agent_session",
+                AgentSessionId: session.SessionId,
+                RuntimeId: agent.AgentId ?? agent.AgentSessionId,
+                Status: session.Status,
+                CreatedAt: session.ObservedAt,
+                UpdatedAt: session.ObservedAt,
+                ProviderSessionRef: session.OpenCodeSessionId,
+                TranscriptAuthority: "provider",
+                Extensions: ImmutableDictionary<string, JsonElement>.Empty.Add(
+                    "tradecraft.poc",
+                    JsonSerializer.SerializeToElement(new
+                    {
+                        runtime_path = session.RuntimePath
+                    }))));
     }
 }

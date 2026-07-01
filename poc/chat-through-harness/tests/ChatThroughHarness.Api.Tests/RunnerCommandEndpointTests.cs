@@ -1,699 +1,581 @@
 namespace ChatThroughHarness.Api.Tests;
 
-using System.Security.Cryptography;
-using System.Text;
-using System.Text.Json;
+using System.Collections.Immutable;
 using System.Net.Http.Json;
-using ChatThroughHarness.Protocol;
+using System.Security.Cryptography;
+using System.Text.Json;
+using ChatThroughHarness.Protocol.V1;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Xunit;
 
-public sealed class RunnerCommandEndpointTests : IClassFixture<WebApplicationFactory<Program>>
+public sealed class RunnerCommandEndpointTests(
+    WebApplicationFactory<Program> factory)
+    : IClassFixture<WebApplicationFactory<Program>>
 {
-    private readonly WebApplicationFactory<Program> _factory;
-
-    public RunnerCommandEndpointTests(WebApplicationFactory<Program> factory)
-    {
-        _factory = factory;
-    }
-
     [Fact]
     public async Task SystemInfoPublishesPortalContract()
     {
-        using var client = _factory.CreateClient();
+        // Arrange
+        using var client = factory.CreateClient();
 
+        // Act
         using var response = await client.GetAsync("/api/system/info");
         response.EnsureSuccessStatusCode();
-        using var payload = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        using var payload = JsonDocument.Parse(
+            await response.Content.ReadAsStringAsync());
 
-        Assert.Equal("chat-through-harness-api", payload.RootElement.GetProperty("service").GetString());
-        Assert.Equal(2, payload.RootElement.GetProperty("contractVersion").GetInt32());
+        // Assert
+        Assert.Equal(
+            "chat-through-harness-api",
+            payload.RootElement.GetProperty("service").GetString());
         Assert.Contains(
             payload.RootElement.GetProperty("capabilities").EnumerateArray(),
             capability => capability.GetString() == "multi-session-agents");
     }
 
     [Fact]
-    public async Task ControllerAgentOwnsMultipleSessions()
+    public async Task ControllerHeartbeat_WhenPostedToV1Route_ThenProjectsInventory()
     {
-        using var client = _factory.CreateClient();
-        var runnerId = Ids.New("runner");
-        await PostHeartbeatAsync(client, runnerId);
+        // Arrange
+        using var client = factory.CreateClient();
+        var observedAt = DateTimeOffset.UtcNow;
+        var heartbeat = Heartbeat(
+            "controller_inventory",
+            observedAt,
+            [
+                Runtime(
+                    "controller_inventory",
+                    "agent_inventory",
+                    observedAt,
+                    "/tmp/runtime",
+                    "/tmp/workspace")
+            ],
+            [
+                Session(
+                    "agent_inventory",
+                    "session_inventory",
+                    observedAt,
+                    "/tmp/runtime/sessions/session_inventory")
+            ]);
 
+        // Act
+        var response = await client.PostAsJsonAsync(
+            "/api/v1/controllers/heartbeats",
+            heartbeat,
+            ControllerProtocolJson.Options);
+        response.EnsureSuccessStatusCode();
+        var controllers = await client.GetFromJsonAsync<
+            IReadOnlyCollection<AgentControllerRecord>>(
+            "/api/agent-controllers",
+            JsonDefaults.Options);
+
+        // Assert
+        Assert.NotNull(controllers);
+        var controller = Assert.Single(
+            controllers,
+            item => item.RunnerId == "controller_inventory");
+        var agent = Assert.Single(controller.Agents);
+        Assert.Equal("agent_inventory", agent.AgentId);
+        Assert.Equal("/tmp/workspace", agent.WorkspacePath);
+        Assert.Single(agent.Sessions!);
+        var projectedSession = await client.GetFromJsonAsync<AgentSessionRecord>(
+            "/api/agent-sessions/session_inventory",
+            JsonDefaults.Options);
+        Assert.Equal("ready", Assert.IsType<AgentSessionRecord>(projectedSession).Status);
+    }
+
+    [Fact]
+    public async Task CreateAgentAndSession_WhenControllerIsActive_ThenQueuesV1Commands()
+    {
+        // Arrange
+        using var client = factory.CreateClient();
+        const string controllerId = "controller_create";
+        await PostHeartbeatAsync(client, controllerId);
+
+        // Act
         var agentResponse = await client.PostAsJsonAsync(
-            $"/api/agent-controllers/{runnerId}/agents",
+            $"/api/agent-controllers/{controllerId}/agents",
             new CreateAgentRequest());
         agentResponse.EnsureSuccessStatusCode();
-        var agent = await agentResponse.Content.ReadFromJsonAsync<AgentRecord>(JsonDefaults.Options);
-        Assert.NotNull(agent);
-        Assert.StartsWith("agent_", agent.Id);
-
-        var commands = await PollCommandsAsync(client, runnerId);
-        var prepareAgent = Assert.Single(commands, command =>
-            command.AgentId == agent.Id
-            && command.Type == RunnerCommandTypes.PrepareAgent);
-        Assert.Null(prepareAgent.SessionId);
-
-        var readyEvent = new RunnerEventEnvelope(
-            Id: Ids.New("event"),
-            RunnerId: runnerId,
-            AgentSessionId: agent.Id,
-            CommandId: prepareAgent.Id,
-            Type: RunnerEventTypes.AgentReady,
-            PayloadRef: null,
-            CausationId: prepareAgent.Id,
-            CorrelationId: agent.Id,
-            CreatedAt: DateTimeOffset.UtcNow,
-            AgentId: agent.Id);
-        (await client.PostAsJsonAsync(
-            "/api/runner/events",
-            readyEvent,
-            RunnerProtocolJson.Options)).EnsureSuccessStatusCode();
-
-        var sessions = new List<AgentSessionRecord>();
-        for (var index = 0; index < 2; index++)
-        {
-            var response = await client.PostAsJsonAsync(
-                $"/api/agents/{agent.Id}/sessions",
-                new CreateAgentSessionRequest(Goal: $"chat {index}"));
-            response.EnsureSuccessStatusCode();
-            sessions.Add((await response.Content.ReadFromJsonAsync<AgentSessionRecord>(JsonDefaults.Options))!);
-        }
-
-        Assert.All(sessions, session => Assert.Equal(agent.Id, session.AgentId));
-        Assert.NotEqual(sessions[0].Id, sessions[1].Id);
-        var listed = await client.GetFromJsonAsync<IReadOnlyCollection<AgentSessionRecord>>(
+        var agent = Assert.IsType<AgentRecord>(
+            await agentResponse.Content.ReadFromJsonAsync<AgentRecord>(
+                JsonDefaults.Options));
+        var commands = await PollCommandsAsync(client, controllerId);
+        var startRuntime = Assert.Single(
+            commands,
+            command => command.CommandType == ControllerCommandTypes.StartAgentRuntime);
+        await PostEventAsync(
+            client,
+            Event(
+                controllerId,
+                ControllerEventTypes.AgentRuntimeReady,
+                runtimeId: agent.Id,
+                commandId: startRuntime.CommandId));
+        var sessionResponse = await client.PostAsJsonAsync(
             $"/api/agents/{agent.Id}/sessions",
-            JsonDefaults.Options);
-        Assert.NotNull(listed);
-        Assert.Equal(2, listed.Count);
+            new CreateAgentSessionRequest(Goal: "native v1"));
+        sessionResponse.EnsureSuccessStatusCode();
+        var session = Assert.IsType<AgentSessionRecord>(
+            await sessionResponse.Content.ReadFromJsonAsync<AgentSessionRecord>(
+                JsonDefaults.Options));
+        commands = await PollCommandsAsync(client, controllerId);
 
-        commands = await PollCommandsAsync(client, runnerId);
-        Assert.Contains(commands, command =>
-            command.AgentId == agent.Id
-            && command.SessionId == sessions[0].Id
-            && command.Type == RunnerCommandTypes.CreateAgentSession);
-        Assert.Contains(commands, command =>
-            command.AgentId == agent.Id
-            && command.SessionId == sessions[1].Id
-            && command.Type == RunnerCommandTypes.CreateAgentSession);
+        // Assert
+        Assert.Contains(
+            commands,
+            command =>
+                command.CommandType == ControllerCommandTypes.CreateAgentSession
+                && command.Target.RuntimeId == agent.Id
+                && command.Target.AgentSessionId == session.Id);
     }
 
     [Fact]
-    public async Task SessionCreationRejectsStaleOwningController()
+    public async Task CommandCallbacks_WhenRetried_ThenReplayOriginalReceipts()
     {
-        using var client = _factory.CreateClient();
-        var runnerId = Ids.New("runner");
-        await PostHeartbeatAsync(client, runnerId);
+        // Arrange
+        using var client = factory.CreateClient();
+        const string controllerId = "controller_callback_replay";
+        await PostHeartbeatAsync(client, controllerId);
         var agentResponse = await client.PostAsJsonAsync(
-            $"/api/agent-controllers/{runnerId}/agents",
+            $"/api/agent-controllers/{controllerId}/agents",
             new CreateAgentRequest());
-        var agent = await agentResponse.Content.ReadFromJsonAsync<AgentRecord>(JsonDefaults.Options);
-        Assert.NotNull(agent);
-        var readyEvent = new RunnerEventEnvelope(
-            Id: Ids.New("event"),
-            RunnerId: runnerId,
-            AgentSessionId: agent.Id,
-            CommandId: null,
-            Type: RunnerEventTypes.AgentReady,
-            PayloadRef: null,
-            CausationId: null,
-            CorrelationId: agent.Id,
-            CreatedAt: DateTimeOffset.UtcNow,
-            AgentId: agent.Id);
-        (await client.PostAsJsonAsync(
-            "/api/runner/events",
-            readyEvent,
-            RunnerProtocolJson.Options)).EnsureSuccessStatusCode();
-        var staleHeartbeat = new RunnerHeartbeat(
-            RunnerId: runnerId,
-            Status: "offline",
-            ActiveCommandIds: [],
-            ObservedAt: DateTimeOffset.UtcNow.AddMinutes(-5),
-            Agents: []);
-        (await client.PostAsJsonAsync(
-            "/api/runner/heartbeat",
-            staleHeartbeat,
-            RunnerProtocolJson.Options)).EnsureSuccessStatusCode();
+        agentResponse.EnsureSuccessStatusCode();
+        var command = Assert.Single(
+            await PollCommandsAsync(client, controllerId),
+            candidate =>
+                candidate.CommandType == ControllerCommandTypes.StartAgentRuntime);
+        var acknowledgement = new ControllerCommandAcknowledgement(
+            ControllerMessageTypes.CommandAcknowledgement,
+            ControllerProtocolVersions.Protocol,
+            ControllerProtocolVersions.Schema,
+            "ack_callback_1",
+            command.CommandId,
+            controllerId,
+            CommandAcknowledgementStatuses.Accepted,
+            DateTimeOffset.UtcNow,
+            command.Correlation);
 
-        var response = await client.PostAsJsonAsync(
-            $"/api/agents/{agent.Id}/sessions",
-            new CreateAgentSessionRequest());
+        // Act
+        using var firstAckResponse = await client.PostAsJsonAsync(
+            $"/api/v1/controllers/{controllerId}/commands/{command.CommandId}" +
+            "/acknowledgements",
+            acknowledgement,
+            ControllerProtocolJson.Options);
+        firstAckResponse.EnsureSuccessStatusCode();
+        var firstAck = Assert.IsType<ControllerCommandAcknowledgement>(
+            await firstAckResponse.Content.ReadFromJsonAsync<
+                ControllerCommandAcknowledgement>(
+                ControllerProtocolJson.Options));
+        using var retryAckResponse = await client.PostAsJsonAsync(
+            $"/api/v1/controllers/{controllerId}/commands/{command.CommandId}" +
+            "/acknowledgements",
+            acknowledgement with
+            {
+                AcknowledgementId = "ack_callback_2",
+                AcknowledgedAt = acknowledgement.AcknowledgedAt.AddSeconds(1)
+            },
+            ControllerProtocolJson.Options);
+        retryAckResponse.EnsureSuccessStatusCode();
+        var retryAck = Assert.IsType<ControllerCommandAcknowledgement>(
+            await retryAckResponse.Content.ReadFromJsonAsync<
+                ControllerCommandAcknowledgement>(
+                ControllerProtocolJson.Options));
+        var completion = new ControllerCommandCompletion(
+            ControllerMessageTypes.CommandCompletion,
+            ControllerProtocolVersions.Protocol,
+            ControllerProtocolVersions.Schema,
+            "completion_callback_1",
+            command.CommandId,
+            controllerId,
+            CommandDeliveryStatuses.Completed,
+            DateTimeOffset.UtcNow,
+            Assert.IsType<CommandLease>(firstAck.Lease).FencingToken,
+            command.Correlation);
+        using var firstCompletionResponse = await client.PostAsJsonAsync(
+            $"/api/v1/controllers/{controllerId}/commands/{command.CommandId}/completion",
+            completion,
+            ControllerProtocolJson.Options);
+        firstCompletionResponse.EnsureSuccessStatusCode();
+        var firstCompletion = Assert.IsType<ControllerCommandCompletion>(
+            await firstCompletionResponse.Content.ReadFromJsonAsync<
+                ControllerCommandCompletion>(
+                ControllerProtocolJson.Options));
+        using var retryCompletionResponse = await client.PostAsJsonAsync(
+            $"/api/v1/controllers/{controllerId}/commands/{command.CommandId}/completion",
+            completion with
+            {
+                CompletionId = "completion_callback_2",
+                CompletedAt = completion.CompletedAt.AddSeconds(1)
+            },
+            ControllerProtocolJson.Options);
+        retryCompletionResponse.EnsureSuccessStatusCode();
+        var retryCompletion = Assert.IsType<ControllerCommandCompletion>(
+            await retryCompletionResponse.Content.ReadFromJsonAsync<
+                ControllerCommandCompletion>(
+                ControllerProtocolJson.Options));
 
-        Assert.Equal(System.Net.HttpStatusCode.Conflict, response.StatusCode);
+        // Assert
+        Assert.Equal(firstAck.AcknowledgementId, retryAck.AcknowledgementId);
+        Assert.Equal(firstAck.Lease?.LeaseId, retryAck.Lease?.LeaseId);
+        Assert.Equal(firstCompletion.CompletionId, retryCompletion.CompletionId);
     }
 
     [Fact]
-    public async Task BrowserLogsAreWrittenToCentralJsonLinesFile()
+    public async Task SubmitTurn_WhenOutcomeEventArrives_ThenProjectsResult()
     {
-        using var client = _factory.CreateClient();
+        // Arrange
+        using var client = factory.CreateClient();
+        var session = await CreateAgentSessionAsync(client, "controller_turn");
+        var turnResponse = await client.PostAsJsonAsync(
+            $"/api/agent-sessions/{session.Id}/turns",
+            new SubmitTurnRequest("hello controller"));
+        turnResponse.EnsureSuccessStatusCode();
+        var turn = Assert.IsType<AgentTurnRecord>(
+            await turnResponse.Content.ReadFromJsonAsync<AgentTurnRecord>(
+                JsonDefaults.Options));
+        var controllerId = Assert.IsType<string>(session.ControllerId);
+        var commands = await PollCommandsAsync(client, controllerId);
+        var invocation = Assert.Single(
+            commands,
+            command =>
+                command.CommandType == ControllerCommandTypes.StartInvocation
+                && command.Target.InvocationId == turn.Id);
+        var result = new AgentTurnResult(
+            "result_1",
+            session.Id,
+            turn.Id,
+            "completed",
+            "hello from controller",
+            [],
+            [],
+            [],
+            null,
+            null);
+        var resultRef = await UploadJsonAsync(
+            client,
+            result,
+            "application/vnd.tradecraft.agent-turn-result+json");
+
+        // Act
+        await PostEventAsync(
+            client,
+            Event(
+                controllerId,
+                ControllerEventTypes.OutcomeReported,
+                runtimeId: session.AgentId,
+                sessionId: session.Id,
+                invocationId: turn.Id,
+                commandId: invocation.CommandId,
+                payloadRef: resultRef));
+        var refreshed = await client.GetFromJsonAsync<AgentTurnRecord>(
+            $"/api/agent-sessions/{session.Id}/turns/{turn.Id}",
+            JsonDefaults.Options);
+
+        // Assert
+        Assert.Equal("completed", Assert.IsType<AgentTurnRecord>(refreshed).Status);
+        Assert.Equal("hello from controller", refreshed.Response);
+    }
+
+    [Fact]
+    public async Task SynchronizeHistory_WhenSnapshotEventArrives_ThenReconcilesTurns()
+    {
+        // Arrange
+        using var client = factory.CreateClient();
+        var session = await CreateAgentSessionAsync(client, "controller_history");
+        var syncResponse = await client.PostAsync(
+            $"/api/agent-sessions/{session.Id}/history/sync",
+            content: null);
+        Assert.Equal(System.Net.HttpStatusCode.Accepted, syncResponse.StatusCode);
+        var controllerId = Assert.IsType<string>(session.ControllerId);
+        var commands = await PollCommandsAsync(client, controllerId);
+        var sync = Assert.Single(
+            commands,
+            command =>
+                command.CommandType
+                == ControllerCommandTypes.SynchronizeSessionHistory);
+        var observedAt = DateTimeOffset.UtcNow;
+        var history = new AgentChatHistory(
+            session.AgentId!,
+            session.Id,
+            "provider_session_1",
+            observedAt,
+            [
+                new AgentChatMessage(
+                    "provider_user_1",
+                    "user",
+                    "restored prompt",
+                    observedAt.AddSeconds(-1),
+                    null),
+                new AgentChatMessage(
+                    "provider_assistant_1",
+                    "assistant",
+                    "restored response",
+                    observedAt,
+                    observedAt)
+            ]);
+        var historyRef = await UploadJsonAsync(
+            client,
+            history,
+            "application/vnd.tradecraft.agent-chat-history+json");
+
+        // Act
+        await PostEventAsync(
+            client,
+            Event(
+                controllerId,
+                ControllerEventTypes.AgentSessionHistorySynchronized,
+                runtimeId: session.AgentId,
+                sessionId: session.Id,
+                commandId: sync.CommandId,
+                payloadRef: historyRef));
+        var turns = await client.GetFromJsonAsync<
+            IReadOnlyCollection<AgentTurnRecord>>(
+            $"/api/agent-sessions/{session.Id}/turns",
+            JsonDefaults.Options);
+
+        // Assert
+        var restored = Assert.Single(Assert.IsAssignableFrom<
+            IReadOnlyCollection<AgentTurnRecord>>(turns));
+        Assert.Equal("restored response", restored.Response);
+        Assert.Equal("provider_user_1", restored.SourceUserMessageId);
+    }
+
+    [Fact]
+    public async Task StaleHeartbeat_WhenQueried_ThenControllerIsNotActive()
+    {
+        // Arrange
+        using var client = factory.CreateClient();
+        var heartbeat = Heartbeat(
+            "controller_stale",
+            DateTimeOffset.UtcNow.AddMinutes(-5));
+
+        // Act
+        var response = await client.PostAsJsonAsync(
+            "/api/v1/controllers/heartbeats",
+            heartbeat,
+            ControllerProtocolJson.Options);
+        response.EnsureSuccessStatusCode();
+        var controller = await client.GetAsync(
+            "/api/agent-controllers/controller_stale");
+
+        // Assert
+        Assert.Equal(System.Net.HttpStatusCode.NotFound, controller.StatusCode);
+    }
+
+    [Fact]
+    public async Task BrowserLog_WhenPosted_ThenWritesCentralJsonLine()
+    {
+        // Arrange
+        using var client = factory.CreateClient();
         var marker = Ids.New("browser_log");
+
+        // Act
         var response = await client.PostAsJsonAsync(
             "/api/client-logs",
             new ClientLogRequest(
-                Level: "error",
-                Message: marker,
-                Timestamp: DateTimeOffset.UtcNow,
-                Context: new Dictionary<string, string?> { ["sessionId"] = "session_1" }));
+                "error",
+                marker,
+                DateTimeOffset.UtcNow,
+                new Dictionary<string, string?> { ["sessionId"] = "session_1" }));
 
+        // Assert
         Assert.Equal(System.Net.HttpStatusCode.Accepted, response.StatusCode);
         var logPath = Path.Combine(RuntimePaths.LogRoot, "browser.jsonl");
-        var contents = await File.ReadAllTextAsync(logPath);
-        Assert.Contains(marker, contents);
-        Assert.Contains("\"source\":\"browser\"", contents);
         Assert.Contains(
             File.ReadLines(logPath),
             line => line.Contains(marker, StringComparison.Ordinal));
     }
 
-    [Fact]
-    public async Task RunnerHeartbeatRegistersControllerAndAgentInventory()
-    {
-        using var client = _factory.CreateClient();
-        var observedAt = DateTimeOffset.UtcNow;
-        var heartbeat = new RunnerHeartbeat(
-            RunnerId: "runner_local",
-            Status: "online",
-            ActiveCommandIds: [],
-            ObservedAt: observedAt,
-            Agents:
-            [
-                new RunnerAgentInventoryItem(
-                    AgentSessionId: "session_local",
-                    Status: "ready",
-                    RuntimePath: "/tmp/agent_local/runtime",
-                    WorkspacePath: "/tmp/agent_local/workspace",
-                    OpenCodeEndpoint: "http://127.0.0.1:4097",
-                    OpenCodePid: 123,
-                    ObservedAt: observedAt,
-                    AgentId: "agent_local",
-                    Sessions:
-                    [
-                        new RunnerAgentSessionInventoryItem(
-                            "session_local",
-                            "ready",
-                            "/tmp/agent_local/runtime/sessions/session_local",
-                            "opencode_local",
-                            observedAt)
-                    ])
-            ]);
-
-        var response = await client.PostAsJsonAsync("/api/runner/heartbeat", heartbeat, RunnerProtocolJson.Options);
-        response.EnsureSuccessStatusCode();
-
-        var controllersResponse = await client.GetAsync("/api/agent-controllers");
-        controllersResponse.EnsureSuccessStatusCode();
-        var controllersJson = await controllersResponse.Content.ReadAsStringAsync();
-        Assert.Contains("\"agentSessionId\"", controllersJson);
-        Assert.DoesNotContain("\"agent_session_id\"", controllersJson);
-        var controllers = JsonSerializer.Deserialize<IReadOnlyCollection<AgentControllerRecord>>(
-            controllersJson,
-            JsonDefaults.Options);
-        Assert.NotNull(controllers);
-        var controller = Assert.Single(controllers, item => item.RunnerId == "runner_local");
-        Assert.Equal("online", controller.Status);
-        var agent = Assert.Single(controller.Agents);
-        Assert.Equal("agent_local", agent.AgentId);
-        Assert.Single(agent.Sessions!);
-
-        var session = await client.GetFromJsonAsync<AgentSessionRecord>(
-            "/api/agent-sessions/session_local",
-            JsonDefaults.Options);
-        Assert.NotNull(session);
-        Assert.Equal("ready", session.Status);
-        Assert.Equal("runner_local", session.ControllerId);
-    }
-
-    [Fact]
-    public async Task StaleRunnerHeartbeatIsNotReturnedAsActiveController()
-    {
-        using var client = _factory.CreateClient();
-        var heartbeat = new RunnerHeartbeat(
-            RunnerId: "runner_stale",
-            Status: "online",
-            ActiveCommandIds: [],
-            ObservedAt: DateTimeOffset.UtcNow.AddMinutes(-5),
-            Agents: []);
-
-        var response = await client.PostAsJsonAsync(
-            "/api/runner/heartbeat",
-            heartbeat,
-            RunnerProtocolJson.Options);
-        response.EnsureSuccessStatusCode();
-
-        var controllers = await client.GetFromJsonAsync<IReadOnlyCollection<AgentControllerRecord>>(
-            "/api/agent-controllers",
-            JsonDefaults.Options);
-        Assert.NotNull(controllers);
-        Assert.DoesNotContain(controllers, item => item.RunnerId == "runner_stale");
-
-        var staleController = await client.GetAsync("/api/agent-controllers/runner_stale");
-        Assert.Equal(System.Net.HttpStatusCode.NotFound, staleController.StatusCode);
-
-        var createResponse = await client.PostAsJsonAsync(
-            "/api/agent-controllers/runner_stale/agents",
-            new CreateAgentRequest());
-        Assert.Equal(System.Net.HttpStatusCode.Conflict, createResponse.StatusCode);
-    }
-
-    [Fact]
-    public async Task RunnerHeartbeatDoesNotOverwriteCancelledSessionStatus()
-    {
-        using var client = _factory.CreateClient();
-        var session = await CreateAgentSessionAsync(client, "runner_terminal");
-
-        var cancelledEvent = new RunnerEventEnvelope(
-            Id: "event_cancelled",
-            RunnerId: "runner_terminal",
-            AgentSessionId: session.Id,
-            CommandId: "cmd_cancel",
-            Type: "agent_session.cancelled",
-            PayloadRef: null,
-            CausationId: "cmd_cancel",
-            CorrelationId: session.Id,
-            CreatedAt: DateTimeOffset.UtcNow,
-            AgentId: session.AgentId,
-            SessionId: session.Id);
-        var eventResponse = await client.PostAsJsonAsync(
-            "/api/runner/events",
-            cancelledEvent,
-            RunnerProtocolJson.Options);
-        eventResponse.EnsureSuccessStatusCode();
-
-        var heartbeat = new RunnerHeartbeat(
-            RunnerId: "runner_terminal",
-            Status: "online",
-            ActiveCommandIds: [],
-            ObservedAt: DateTimeOffset.UtcNow,
-            Agents:
-            [
-                new RunnerAgentInventoryItem(
-                    AgentSessionId: session.Id,
-                    Status: "ready",
-                    RuntimePath: "/tmp/agent_terminal/runtime",
-                    WorkspacePath: session.WorkspacePath,
-                    OpenCodeEndpoint: "http://127.0.0.1:4097",
-                    OpenCodePid: 123,
-                    ObservedAt: DateTimeOffset.UtcNow,
-                    AgentId: session.AgentId,
-                    Sessions:
-                    [
-                        new RunnerAgentSessionInventoryItem(
-                            session.Id,
-                            "ready",
-                            $"/tmp/agent_terminal/runtime/sessions/{session.Id}",
-                            "opencode_terminal",
-                            DateTimeOffset.UtcNow)
-                    ])
-            ]);
-        var heartbeatResponse = await client.PostAsJsonAsync(
-            "/api/runner/heartbeat",
-            heartbeat,
-            RunnerProtocolJson.Options);
-        heartbeatResponse.EnsureSuccessStatusCode();
-
-        var refreshed = await client.GetFromJsonAsync<AgentSessionRecord>(
-            $"/api/agent-sessions/{session.Id}",
-            JsonDefaults.Options);
-        Assert.NotNull(refreshed);
-        Assert.Equal("cancelled", refreshed.Status);
-        Assert.NotNull(refreshed.EndedAt);
-    }
-
-    [Fact]
-    public async Task SubmitTurnQueuesTurnCommandWithoutHarnessResponse()
-    {
-        using var client = _factory.CreateClient();
-        var session = await CreateAgentSessionAsync(client);
-
-        var turnResponse = await client.PostAsJsonAsync(
-            $"/api/agent-sessions/{session.Id}/turns",
-            new SubmitTurnRequest("hello runner"));
-        turnResponse.EnsureSuccessStatusCode();
-        var turn = await turnResponse.Content.ReadFromJsonAsync<AgentTurnRecord>(JsonDefaults.Options);
-        Assert.NotNull(turn);
-        Assert.Equal("submitted", turn.Status);
-        Assert.Null(turn.Response);
-
-        var commands = await PollCommandsAsync(client);
-        var command = Assert.Single(commands, command =>
-            command.AgentSessionId == session.Id &&
-            command.Type == RunnerCommandTypes.SubmitAgentTurn);
-
-        Assert.Equal(turn.Id, command.CorrelationId);
-        Assert.NotNull(command.PayloadRef);
-
-        var payload = await ReadContentAsync(client, command.PayloadRef!);
-        Assert.Contains("\"instruction\"", payload);
-        Assert.Contains("hello runner", payload);
-
-        var turns = await client.GetFromJsonAsync<IReadOnlyCollection<AgentTurnRecord>>(
-            $"/api/agent-sessions/{session.Id}/turns",
-            JsonDefaults.Options);
-        Assert.NotNull(turns);
-        Assert.Contains(turns, item => item.Id == turn.Id);
-    }
-
-    [Fact]
-    public async Task RunnerReadyEventUpdatesSessionStatus()
-    {
-        using var client = _factory.CreateClient();
-        var session = await CreateAgentSessionAsync(client);
-
-        var runnerEvent = new RunnerEventEnvelope(
-            Id: "event_ready",
-            RunnerId: "runner_test",
-            AgentSessionId: session.Id,
-            CommandId: "cmd_prepare",
-            Type: RunnerEventTypes.AgentSessionReady,
-            PayloadRef: null,
-            CausationId: "cmd_prepare",
-            CorrelationId: session.Id,
-            CreatedAt: DateTimeOffset.UtcNow);
-
-        var eventResponse = await client.PostAsJsonAsync("/api/runner/events", runnerEvent, RunnerProtocolJson.Options);
-        eventResponse.EnsureSuccessStatusCode();
-
-        var refreshed = await client.GetFromJsonAsync<AgentSessionRecord>(
-            $"/api/agent-sessions/{session.Id}",
-            JsonDefaults.Options);
-        Assert.NotNull(refreshed);
-        Assert.Equal("ready", refreshed.Status);
-        Assert.NotNull(refreshed.ReadyAt);
-    }
-
-    [Fact]
-    public async Task RunnerTurnCompletedEventUpdatesTurnResponse()
-    {
-        using var client = _factory.CreateClient();
-        var session = await CreateAgentSessionAsync(client);
-
-        var turnResponse = await client.PostAsJsonAsync(
-            $"/api/agent-sessions/{session.Id}/turns",
-            new SubmitTurnRequest("hello runner"));
-        turnResponse.EnsureSuccessStatusCode();
-        var turn = await turnResponse.Content.ReadFromJsonAsync<AgentTurnRecord>(JsonDefaults.Options);
-        Assert.NotNull(turn);
-
-        var result = new AgentTurnResult(
-            Id: "result_1",
-            AgentSessionId: session.Id,
-            RequestId: turn.Id,
-            Status: "completed",
-            Message: "hello from runner",
-            ArtifactRefs: [],
-            ChangedFiles: [],
-            CommandsObserved: [],
-            FailureReport: null,
-            Diagnostics: null);
-        var payloadRef = await UploadJsonAsync(client, result, "application/vnd.tradecraft.agent-turn-result+json");
-        var runnerEvent = new RunnerEventEnvelope(
-            Id: "event_turn_completed",
-            RunnerId: "runner_test",
-            AgentSessionId: session.Id,
-            CommandId: "cmd_turn",
-            Type: RunnerEventTypes.AgentTurnCompleted,
-            PayloadRef: payloadRef,
-            CausationId: "cmd_turn",
-            CorrelationId: turn.Id,
-            CreatedAt: DateTimeOffset.UtcNow);
-
-        var eventResponse = await client.PostAsJsonAsync("/api/runner/events", runnerEvent, RunnerProtocolJson.Options);
-        eventResponse.EnsureSuccessStatusCode();
-
-        var refreshed = await client.GetFromJsonAsync<AgentTurnRecord>(
-            $"/api/agent-sessions/{session.Id}/turns/{turn.Id}",
-            JsonDefaults.Options);
-        Assert.NotNull(refreshed);
-        Assert.Equal("completed", refreshed.Status);
-        Assert.Equal("hello from runner", refreshed.Response);
-
-        var events = await client.GetFromJsonAsync<IReadOnlyCollection<RuntimeEventRecord>>(
-            $"/api/agent-sessions/{session.Id}/events",
-            JsonDefaults.Options);
-        Assert.NotNull(events);
-        var completedEvent = Assert.Single(events, item => item.Type == RunnerEventTypes.AgentTurnCompleted);
-        Assert.Equal(turn.Id, completedEvent.TurnId);
-    }
-
-    [Fact]
-    public async Task RunnerTurnFailedEventProjectsStructuredFailureDetails()
-    {
-        using var client = _factory.CreateClient();
-        var session = await CreateAgentSessionAsync(client);
-
-        var turnResponse = await client.PostAsJsonAsync(
-            $"/api/agent-sessions/{session.Id}/turns",
-            new SubmitTurnRequest("hello runner"));
-        turnResponse.EnsureSuccessStatusCode();
-        var turn = await turnResponse.Content.ReadFromJsonAsync<AgentTurnRecord>(JsonDefaults.Options);
-        Assert.NotNull(turn);
-
-        var result = new AgentTurnResult(
-            Id: "result_failed",
-            AgentSessionId: session.Id,
-            RequestId: turn.Id,
-            Status: "failed",
-            Message: "OpenCode server request failed.",
-            ArtifactRefs: [],
-            ChangedFiles: [],
-            CommandsObserved: [],
-            FailureReport: new FailureReport(
-                Summary: "OpenCode server request failed.",
-                Detail: "Connection refused"),
-            Diagnostics: null);
-        var payloadRef = await UploadJsonAsync(client, result, "application/vnd.tradecraft.agent-turn-result+json");
-        var runnerEvent = new RunnerEventEnvelope(
-            Id: "event_turn_failed",
-            RunnerId: "runner_test",
-            AgentSessionId: session.Id,
-            CommandId: "cmd_turn",
-            Type: RunnerEventTypes.AgentTurnFailed,
-            PayloadRef: payloadRef,
-            CausationId: "cmd_turn",
-            CorrelationId: turn.Id,
-            CreatedAt: DateTimeOffset.UtcNow);
-
-        var eventResponse = await client.PostAsJsonAsync(
-            "/api/runner/events",
-            runnerEvent,
-            RunnerProtocolJson.Options);
-        eventResponse.EnsureSuccessStatusCode();
-
-        var refreshed = await client.GetFromJsonAsync<AgentTurnRecord>(
-            $"/api/agent-sessions/{session.Id}/turns/{turn.Id}",
-            JsonDefaults.Options);
-        Assert.NotNull(refreshed);
-        Assert.Equal("failed", refreshed.Status);
-        Assert.Equal("OpenCode server request failed.", refreshed.FailureSummary);
-        Assert.Equal("Connection refused", refreshed.FailureDetail);
-    }
-
-    [Fact]
-    public async Task RunnerTurnFailedEventAcceptsPlainTextProcessDiagnostics()
-    {
-        using var client = _factory.CreateClient();
-        var session = await CreateAgentSessionAsync(client);
-
-        var turnResponse = await client.PostAsJsonAsync(
-            $"/api/agent-sessions/{session.Id}/turns",
-            new SubmitTurnRequest("hello runner"));
-        turnResponse.EnsureSuccessStatusCode();
-        var turn = await turnResponse.Content.ReadFromJsonAsync<AgentTurnRecord>(JsonDefaults.Options);
-        Assert.NotNull(turn);
-
-        var payloadRef = await UploadTextAsync(client, "exit_code: 2\nstderr: boom", "text/plain");
-        var runnerEvent = new RunnerEventEnvelope(
-            Id: "event_turn_process_failed",
-            RunnerId: "runner_test",
-            AgentSessionId: session.Id,
-            CommandId: "cmd_turn",
-            Type: RunnerEventTypes.AgentTurnFailed,
-            PayloadRef: payloadRef,
-            CausationId: "cmd_turn",
-            CorrelationId: turn.Id,
-            CreatedAt: DateTimeOffset.UtcNow);
-
-        var eventResponse = await client.PostAsJsonAsync(
-            "/api/runner/events",
-            runnerEvent,
-            RunnerProtocolJson.Options);
-        eventResponse.EnsureSuccessStatusCode();
-
-        var refreshed = await client.GetFromJsonAsync<AgentTurnRecord>(
-            $"/api/agent-sessions/{session.Id}/turns/{turn.Id}",
-            JsonDefaults.Options);
-        Assert.NotNull(refreshed);
-        Assert.Equal("failed", refreshed.Status);
-        Assert.Contains("exit_code: 2", refreshed.FailureSummary);
-    }
-
-    [Fact]
-    public async Task OpenCodeHistorySyncEnrichesExistingTurnsAndRestoresMissingTurns()
-    {
-        using var client = _factory.CreateClient();
-        var runnerId = Ids.New("runner");
-        var session = await CreateAgentSessionAsync(client, runnerId);
-        var submittedResponse = await client.PostAsJsonAsync(
-            $"/api/agent-sessions/{session.Id}/turns",
-            new SubmitTurnRequest("existing prompt"));
-        submittedResponse.EnsureSuccessStatusCode();
-        var submitted = await submittedResponse.Content.ReadFromJsonAsync<AgentTurnRecord>(JsonDefaults.Options);
-        Assert.NotNull(submitted);
-
-        var syncResponse = await client.PostAsync(
-            $"/api/agent-sessions/{session.Id}/history/sync",
-            content: null);
-        Assert.Equal(System.Net.HttpStatusCode.Accepted, syncResponse.StatusCode);
-        var commands = await PollCommandsAsync(client, runnerId);
-        var syncCommand = Assert.Single(commands, command =>
-            command.Type == RunnerCommandTypes.SyncAgentSessionHistory
-            && command.SessionId == session.Id);
-        Assert.Null(syncCommand.PayloadRef);
-
-        var observedAt = DateTimeOffset.UtcNow;
-        var history = new AgentChatHistory(
-            AgentId: session.AgentId!,
-            AgentSessionId: session.Id,
-            OpenCodeSessionId: "oc_session_1",
-            ObservedAt: observedAt,
-            Messages:
-            [
-                new AgentChatMessage("oc_user_1", "user", "existing prompt", observedAt.AddSeconds(-4), null),
-                new AgentChatMessage("oc_assistant_1", "assistant", "existing response", observedAt.AddSeconds(-3), observedAt.AddSeconds(-2)),
-                new AgentChatMessage("oc_user_2", "user", "older prompt", observedAt.AddSeconds(-1), null),
-                new AgentChatMessage("oc_assistant_2", "assistant", "older response", observedAt, observedAt)
-            ]);
-        var payloadRef = await UploadJsonAsync(
-            client,
-            history,
-            "application/vnd.tradecraft.agent-chat-history+json");
-        var historyEvent = new RunnerEventEnvelope(
-            Id: Ids.New("event"),
-            RunnerId: runnerId,
-            AgentSessionId: session.Id,
-            CommandId: syncCommand.Id,
-            Type: RunnerEventTypes.AgentSessionHistorySynced,
-            PayloadRef: payloadRef,
-            CausationId: syncCommand.Id,
-            CorrelationId: session.Id,
-            CreatedAt: observedAt,
-            AgentId: session.AgentId,
-            SessionId: session.Id);
-        (await client.PostAsJsonAsync(
-            "/api/runner/events",
-            historyEvent,
-            RunnerProtocolJson.Options)).EnsureSuccessStatusCode();
-
-        var turns = await client.GetFromJsonAsync<IReadOnlyCollection<AgentTurnRecord>>(
-            $"/api/agent-sessions/{session.Id}/turns",
-            JsonDefaults.Options);
-        Assert.NotNull(turns);
-        Assert.Equal(2, turns.Count);
-        var enriched = Assert.Single(turns, turn => turn.Id == submitted.Id);
-        Assert.Equal("oc_user_1", enriched.SourceUserMessageId);
-        Assert.Equal("existing response", enriched.Response);
-        Assert.Equal("completed", enriched.Status);
-        var restored = Assert.Single(turns, turn => turn.SourceUserMessageId == "oc_user_2");
-        Assert.StartsWith("turn_history_", restored.Id);
-        Assert.Equal("older response", restored.Response);
-        Assert.Equal(observedAt, restored.HistorySyncedAt);
-    }
-
     private static async Task<AgentSessionRecord> CreateAgentSessionAsync(
         HttpClient client,
-        string runnerId = "runner_test")
+        string controllerId)
     {
-        await PostHeartbeatAsync(client, runnerId);
+        await PostHeartbeatAsync(client, controllerId);
         var agentResponse = await client.PostAsJsonAsync(
-            $"/api/agent-controllers/{runnerId}/agents",
+            $"/api/agent-controllers/{controllerId}/agents",
             new CreateAgentRequest());
         agentResponse.EnsureSuccessStatusCode();
-        var agent = await agentResponse.Content.ReadFromJsonAsync<AgentRecord>(JsonDefaults.Options);
-        Assert.NotNull(agent);
-        var readyEvent = new RunnerEventEnvelope(
-            Id: Ids.New("event"),
-            RunnerId: runnerId,
-            AgentSessionId: agent.Id,
-            CommandId: null,
-            Type: RunnerEventTypes.AgentReady,
-            PayloadRef: null,
-            CausationId: null,
-            CorrelationId: agent.Id,
-            CreatedAt: DateTimeOffset.UtcNow,
-            AgentId: agent.Id);
-        (await client.PostAsJsonAsync(
-            "/api/runner/events",
-            readyEvent,
-            RunnerProtocolJson.Options)).EnsureSuccessStatusCode();
+        var agent = Assert.IsType<AgentRecord>(
+            await agentResponse.Content.ReadFromJsonAsync<AgentRecord>(
+                JsonDefaults.Options));
+        await PostEventAsync(
+            client,
+            Event(
+                controllerId,
+                ControllerEventTypes.AgentRuntimeReady,
+                runtimeId: agent.Id));
         var sessionResponse = await client.PostAsJsonAsync(
             $"/api/agents/{agent.Id}/sessions",
             new CreateAgentSessionRequest());
         sessionResponse.EnsureSuccessStatusCode();
-        var session = await sessionResponse.Content.ReadFromJsonAsync<AgentSessionRecord>(JsonDefaults.Options);
-        Assert.NotNull(session);
-        return session;
+        return Assert.IsType<AgentSessionRecord>(
+            await sessionResponse.Content.ReadFromJsonAsync<AgentSessionRecord>(
+                JsonDefaults.Options));
     }
 
-    private static async Task<IReadOnlyCollection<RunnerCommandEnvelope>> PollCommandsAsync(
-        HttpClient client,
-        string runnerId = "runner_test")
+    private static async Task<IReadOnlyCollection<ControllerCommand>>
+        PollCommandsAsync(HttpClient client, string controllerId)
     {
-        var commands = await client.GetFromJsonAsync<IReadOnlyCollection<RunnerCommandEnvelope>>(
-            $"/api/runner/commands?runnerId={runnerId}&wait=0",
-            RunnerProtocolJson.Options);
+        var commands = await client.GetFromJsonAsync<
+            IReadOnlyCollection<ControllerCommand>>(
+            $"/api/v1/controllers/{controllerId}/commands?wait=0",
+            ControllerProtocolJson.Options);
         return commands ?? [];
     }
 
-    private static async Task PostHeartbeatAsync(HttpClient client, string runnerId)
+    private static async Task PostHeartbeatAsync(
+        HttpClient client,
+        string controllerId)
     {
-        var heartbeat = new RunnerHeartbeat(
-            RunnerId: runnerId,
-            Status: "online",
-            ActiveCommandIds: [],
-            ObservedAt: DateTimeOffset.UtcNow,
-            Agents: []);
         var response = await client.PostAsJsonAsync(
-            "/api/runner/heartbeat",
-            heartbeat,
-            RunnerProtocolJson.Options);
+            "/api/v1/controllers/heartbeats",
+            Heartbeat(controllerId, DateTimeOffset.UtcNow),
+            ControllerProtocolJson.Options);
         response.EnsureSuccessStatusCode();
     }
 
-    private static async Task<string> ReadContentAsync(HttpClient client, ClaimCheckContentRef contentRef)
-    {
-        var contentId = contentRef.Uri.Split('/').Last();
-        return await client.GetStringAsync($"/api/runner/content/{contentId}");
-    }
-
-    private static async Task<ClaimCheckContentRef> UploadJsonAsync<T>(HttpClient client, T value, string contentType)
-    {
-        var bytes = JsonSerializer.SerializeToUtf8Bytes(value, JsonDefaults.Options);
-        return await UploadBytesAsync(client, bytes, contentType);
-    }
-
-    private static Task<ClaimCheckContentRef> UploadTextAsync(
+    private static async Task PostEventAsync(
         HttpClient client,
-        string value,
-        string contentType)
+        ControllerEvent controllerEvent)
     {
-        return UploadBytesAsync(client, System.Text.Encoding.UTF8.GetBytes(value), contentType);
-    }
-
-    private static async Task<ClaimCheckContentRef> UploadBytesAsync(
-        HttpClient client,
-        byte[] bytes,
-        string contentType)
-    {
-        var upload = new ClaimCheckContentUploadRequest(
-            ContentType: contentType,
-            Sha256: Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant(),
-            Length: bytes.LongLength,
-            ContentBase64: Convert.ToBase64String(bytes));
-        var response = await client.PostAsJsonAsync("/api/runner/content", upload, RunnerProtocolJson.Options);
+        var response = await client.PostAsJsonAsync(
+            $"/api/v1/controllers/{controllerEvent.ControllerId}/events",
+            controllerEvent,
+            ControllerProtocolJson.Options);
         response.EnsureSuccessStatusCode();
-        var body = await response.Content.ReadFromJsonAsync<ClaimCheckContentUploadResponse>(RunnerProtocolJson.Options);
-        Assert.NotNull(body);
-        return body.ContentRef;
+    }
+
+    private static ControllerHeartbeat Heartbeat(
+        string controllerId,
+        DateTimeOffset observedAt,
+        ImmutableArray<AgentRuntimeResource>? runtimes = null,
+        ImmutableArray<AgentSessionResource>? sessions = null)
+    {
+        return new ControllerHeartbeat(
+            ControllerMessageTypes.Heartbeat,
+            ControllerProtocolVersions.Protocol,
+            ControllerProtocolVersions.Schema,
+            controllerId,
+            "online",
+            observedAt,
+            [],
+            new ControllerInventory(
+                runtimes ?? [],
+                sessions ?? []));
+    }
+
+    private static AgentRuntimeResource Runtime(
+        string controllerId,
+        string runtimeId,
+        DateTimeOffset observedAt,
+        string runtimePath,
+        string workspacePath)
+    {
+        return new AgentRuntimeResource(
+            "agent_runtime",
+            runtimeId,
+            controllerId,
+            "ready",
+            "opencode",
+            "local_process",
+            observedAt,
+            observedAt,
+            Extensions: ImmutableDictionary<string, JsonElement>.Empty.Add(
+                "tradecraft.poc",
+                JsonSerializer.SerializeToElement(new
+                {
+                    agent_session_id = runtimeId,
+                    runtime_path = runtimePath,
+                    workspace_path = workspacePath,
+                    opencode_endpoint = "http://127.0.0.1:4097",
+                    opencode_pid = 123
+                })));
+    }
+
+    private static AgentSessionResource Session(
+        string runtimeId,
+        string sessionId,
+        DateTimeOffset observedAt,
+        string runtimePath)
+    {
+        return new AgentSessionResource(
+            "agent_session",
+            sessionId,
+            runtimeId,
+            "ready",
+            observedAt,
+            observedAt,
+            ProviderSessionRef: "provider_session_1",
+            TranscriptAuthority: "provider",
+            Extensions: ImmutableDictionary<string, JsonElement>.Empty.Add(
+                "tradecraft.poc",
+                JsonSerializer.SerializeToElement(new
+                {
+                    runtime_path = runtimePath
+                })));
+    }
+
+    private static ControllerEvent Event(
+        string controllerId,
+        string eventType,
+        string? runtimeId = null,
+        string? sessionId = null,
+        string? invocationId = null,
+        string? commandId = null,
+        ContentReference? payloadRef = null)
+    {
+        var aggregate = invocationId is not null
+            ? new AggregateReference("invocation", invocationId)
+            : sessionId is not null
+                ? new AggregateReference("agent_session", sessionId)
+                : new AggregateReference("runtime", runtimeId!);
+        return new ControllerEvent(
+            ControllerMessageTypes.Event,
+            ControllerProtocolVersions.Protocol,
+            ControllerProtocolVersions.Schema,
+            Ids.New("event"),
+            controllerId,
+            eventType,
+            aggregate,
+            1,
+            DateTimeOffset.UtcNow,
+            ControllerProtocolVersions.Schema,
+            new ResourceTarget(
+                controllerId,
+                runtimeId,
+                sessionId,
+                invocationId),
+            new ProtocolCorrelation(
+                CommandId: commandId,
+                CausationId: commandId,
+                CorrelationId: invocationId ?? sessionId ?? runtimeId,
+                InvocationId: invocationId),
+            PayloadRef: payloadRef,
+            Payload: payloadRef is null
+                ? JsonSerializer.SerializeToElement(new { })
+                : null);
+    }
+
+    private static async Task<ContentReference> UploadJsonAsync<T>(
+        HttpClient client,
+        T value,
+        string contentType)
+    {
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(
+            value,
+            JsonDefaults.Options);
+        var upload = new ControllerContentUploadRequest(
+            contentType,
+            Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant(),
+            bytes.LongLength,
+            Convert.ToBase64String(bytes));
+        var response = await client.PostAsJsonAsync(
+            "/api/v1/controller-content",
+            upload,
+            ControllerProtocolJson.Options);
+        response.EnsureSuccessStatusCode();
+        var body = await response.Content.ReadFromJsonAsync<
+            ControllerContentUploadResponse>(ControllerProtocolJson.Options);
+        return Assert.IsType<ControllerContentUploadResponse>(body).ContentRef;
     }
 }

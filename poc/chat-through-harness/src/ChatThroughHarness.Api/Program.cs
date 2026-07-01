@@ -3,7 +3,7 @@ using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using ChatThroughHarness.Protocol;
+using ChatThroughHarness.Protocol.V1;
 using Microsoft.AspNetCore.SignalR;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -62,8 +62,8 @@ app.MapPost("/api/client-logs", async (
     return Results.Accepted();
 });
 
-app.MapGet("/api/runner/commands", async (
-    string runnerId,
+app.MapGet("/api/v1/controllers/{controllerId}/commands", async (
+    string controllerId,
     string? wait,
     RunnerControlStore runnerStore,
     CancellationToken cancellationToken) =>
@@ -71,7 +71,7 @@ app.MapGet("/api/runner/commands", async (
     var deadline = DateTimeOffset.UtcNow + ParseLongPollWait(wait);
     while (!cancellationToken.IsCancellationRequested)
     {
-        var commands = await runnerStore.GetAvailableCommandsAsync(runnerId, cancellationToken);
+        var commands = await runnerStore.GetAvailableCommandsAsync(controllerId, cancellationToken);
         if (commands.Count > 0 || DateTimeOffset.UtcNow >= deadline)
         {
             return Results.Ok(commands);
@@ -80,78 +80,105 @@ app.MapGet("/api/runner/commands", async (
         await Task.Delay(TimeSpan.FromMilliseconds(250), cancellationToken);
     }
 
-    return Results.Ok(Array.Empty<RunnerCommandEnvelope>());
+    return Results.Ok(Array.Empty<ControllerCommand>());
 });
 
-app.MapPost("/api/runner/commands/{commandId}/claim", async (
+app.MapPost("/api/v1/controllers/{controllerId}/commands/{commandId}/acknowledgements", async (
+    string controllerId,
     string commandId,
-    ClaimRunnerCommandRequest request,
+    ControllerCommandAcknowledgement acknowledgement,
     RunnerControlStore runnerStore,
     CancellationToken cancellationToken) =>
 {
-    var result = await runnerStore.ClaimCommandAsync(commandId, request, cancellationToken);
+    if (!controllerId.Equals(acknowledgement.ControllerId, StringComparison.Ordinal)
+        || !commandId.Equals(acknowledgement.CommandId, StringComparison.Ordinal))
+    {
+        return Results.BadRequest(new { message = "Route and acknowledgement identifiers must match." });
+    }
+
+    var result = await runnerStore.AcknowledgeCommandAsync(
+        acknowledgement,
+        cancellationToken);
     return result.Status switch
     {
-        RunnerCommandMutationStatus.NotFound => Results.NotFound(),
-        RunnerCommandMutationStatus.Conflict => Results.Conflict(new { message = result.Message }),
-        _ => Results.Ok(result.Command)
+        ControllerCommandMutationStatus.NotFound => Results.NotFound(),
+        ControllerCommandMutationStatus.Conflict => Results.Conflict(new { message = result.Message }),
+        _ => Results.Ok(result.Acknowledgement)
     };
 });
 
-app.MapPost("/api/runner/commands/{commandId}/complete", async (
+app.MapPost("/api/v1/controllers/{controllerId}/commands/{commandId}/completion", async (
+    string controllerId,
     string commandId,
-    CompleteRunnerCommandRequest request,
+    ControllerCommandCompletion completion,
     RunnerControlStore runnerStore,
     CancellationToken cancellationToken) =>
 {
-    var result = await runnerStore.CompleteCommandAsync(commandId, request, cancellationToken);
+    if (!controllerId.Equals(completion.ControllerId, StringComparison.Ordinal)
+        || !commandId.Equals(completion.CommandId, StringComparison.Ordinal))
+    {
+        return Results.BadRequest(new { message = "Route and completion identifiers must match." });
+    }
+
+    var result = await runnerStore.CompleteCommandAsync(completion, cancellationToken);
     return result.Status switch
     {
-        RunnerCommandMutationStatus.NotFound => Results.NotFound(),
-        RunnerCommandMutationStatus.Conflict => Results.Conflict(new { message = result.Message }),
-        _ => Results.Ok(result.Command)
+        ControllerCommandMutationStatus.NotFound => Results.NotFound(),
+        ControllerCommandMutationStatus.Conflict => Results.Conflict(new { message = result.Message }),
+        _ => Results.Ok(result.Completion)
     };
 });
 
-app.MapPost("/api/runner/events", async (
-    RunnerEventEnvelope runnerEvent,
+app.MapPost("/api/v1/controllers/{controllerId}/events", async (
+    string controllerId,
+    ControllerEvent controllerEvent,
     RunnerControlStore runnerStore,
     AgentStore agentStore,
     AgentSessionStore sessionStore,
     IHubContext<AgentSessionHub> hub,
     CancellationToken cancellationToken) =>
 {
-    await runnerStore.AddEventAsync(runnerEvent, cancellationToken);
-    await ApplyRunnerEventAsync(runnerEvent, runnerStore, agentStore, sessionStore, cancellationToken);
+    if (!controllerId.Equals(controllerEvent.ControllerId, StringComparison.Ordinal))
+    {
+        return Results.BadRequest(new { message = "Route and event controller identifiers must match." });
+    }
+
+    await runnerStore.AddEventAsync(controllerEvent, cancellationToken);
+    await ApplyControllerEventAsync(
+        controllerEvent,
+        runnerStore,
+        agentStore,
+        sessionStore,
+        cancellationToken);
     await PublishAsync(
         sessionStore,
         hub,
-        runnerEvent.AgentSessionId,
-        RunnerEventTurnId(runnerEvent),
-        runnerEvent.Type,
-        runnerEvent,
+        controllerEvent.Target.AgentSessionId ?? controllerEvent.Aggregate.Id,
+        ControllerEventInvocationId(controllerEvent),
+        UiEventType(controllerEvent),
+        controllerEvent,
         cancellationToken);
     return Results.Accepted();
 });
 
-app.MapPost("/api/runner/heartbeat", async (
-    RunnerHeartbeat heartbeat,
+app.MapPost("/api/v1/controllers/heartbeats", async (
+    ControllerHeartbeat heartbeat,
     RunnerControlStore runnerStore,
     AgentStore agentStore,
     AgentSessionStore sessionStore,
     CancellationToken cancellationToken) =>
 {
-    await runnerStore.UpsertRunnerHeartbeatAsync(heartbeat, cancellationToken);
-    foreach (var agent in heartbeat.Agents)
+    await runnerStore.UpsertControllerHeartbeatAsync(heartbeat, cancellationToken);
+    foreach (var agent in ControllerInventoryObservation.FromHeartbeat(heartbeat))
     {
         var ownershipAccepted = await agentStore.UpsertInventoryAgentAsync(
-            heartbeat.RunnerId,
+            heartbeat.ControllerId,
             agent,
             cancellationToken);
         foreach (var session in ownershipAccepted ? agent.Sessions ?? [] : [])
         {
             await sessionStore.UpsertInventorySessionAsync(
-                heartbeat.RunnerId,
+                heartbeat.ControllerId,
                 agent.AgentId ?? agent.AgentSessionId,
                 session,
                 agent.WorkspacePath,
@@ -162,8 +189,8 @@ app.MapPost("/api/runner/heartbeat", async (
     return Results.Accepted();
 });
 
-app.MapPost("/api/runner/content", async (
-    ClaimCheckContentUploadRequest request,
+app.MapPost("/api/v1/controller-content", async (
+    ControllerContentUploadRequest request,
     RunnerControlStore runnerStore,
     CancellationToken cancellationToken) =>
 {
@@ -178,7 +205,7 @@ app.MapPost("/api/runner/content", async (
     }
 });
 
-app.MapGet("/api/runner/content/{contentId}", async (
+app.MapGet("/api/v1/controller-content/{contentId}", async (
     string contentId,
     RunnerControlStore runnerStore,
     CancellationToken cancellationToken) =>
@@ -193,7 +220,7 @@ app.MapGet("/api/agent-controllers", async (
     RunnerControlStore runnerStore,
     CancellationToken cancellationToken) =>
 {
-    var heartbeats = await runnerStore.GetRunnerHeartbeatsAsync(cancellationToken);
+    var heartbeats = await runnerStore.GetControllerHeartbeatsAsync(cancellationToken);
     return Results.Ok(
         heartbeats
             .Where(AgentControllerRecord.IsActive)
@@ -206,7 +233,7 @@ app.MapGet("/api/agent-controllers/{runnerId}", async (
     RunnerControlStore runnerStore,
     CancellationToken cancellationToken) =>
 {
-    var heartbeat = await runnerStore.GetRunnerHeartbeatAsync(runnerId, cancellationToken);
+    var heartbeat = await runnerStore.GetControllerHeartbeatAsync(runnerId, cancellationToken);
     return heartbeat is null || !AgentControllerRecord.IsActive(heartbeat)
         ? Results.NotFound()
         : Results.Ok(AgentControllerRecord.FromHeartbeat(heartbeat));
@@ -219,7 +246,7 @@ app.MapPost("/api/agent-controllers/{controllerId}/agents", async (
     RunnerControlStore runnerStore,
     CancellationToken cancellationToken) =>
 {
-    var heartbeat = await runnerStore.GetRunnerHeartbeatAsync(controllerId, cancellationToken);
+    var heartbeat = await runnerStore.GetControllerHeartbeatAsync(controllerId, cancellationToken);
     if (heartbeat is null || !AgentControllerRecord.IsActive(heartbeat))
     {
         return Results.Conflict(new { message = $"Agent controller {controllerId} is not active." });
@@ -231,15 +258,20 @@ app.MapPost("/api/agent-controllers/{controllerId}/agents", async (
         AgentSpec.FromAgent(agent),
         "application/vnd.tradecraft.agent-spec+json",
         cancellationToken);
-    var command = RunnerCommandFactory.Create(
-        agent.Id,
-        RunnerCommandTypes.PrepareAgent,
+    var command = ControllerCommandFactory.Create(
+        ControllerCommandTypes.StartAgentRuntime,
         payloadRef,
         correlationId: agent.Id,
         idempotencyKey: agent.Id,
         runnerId: controllerId,
         agentId: agent.Id);
-    await runnerStore.EnqueueCommandAsync(command, cancellationToken);
+    var enqueue = await runnerStore.EnqueueCommandAsync(command, cancellationToken);
+    if (enqueue.Status == ControllerCommandEnqueueStatus.Conflict)
+    {
+        return Results.Conflict(new { message = enqueue.Message });
+    }
+
+    command = enqueue.Command!;
     return Results.Created($"/api/agents/{agent.Id}", agent);
 });
 
@@ -267,15 +299,20 @@ app.MapPost("/api/agents/{agentId}/stop", async (
         new { reason = "Stopped by operator." },
         "application/vnd.tradecraft.agent-stop+json",
         cancellationToken);
-    var command = RunnerCommandFactory.Create(
-        agent.Id,
-        RunnerCommandTypes.StopAgent,
+    var command = ControllerCommandFactory.Create(
+        ControllerCommandTypes.StopAgentRuntime,
         payloadRef,
         correlationId: agent.Id,
         idempotencyKey: $"stop:{agent.Id}",
         runnerId: agent.ControllerId,
         agentId: agent.Id);
-    await runnerStore.EnqueueCommandAsync(command, cancellationToken);
+    var enqueue = await runnerStore.EnqueueCommandAsync(command, cancellationToken);
+    if (enqueue.Status == ControllerCommandEnqueueStatus.Conflict)
+    {
+        return Results.Conflict(new { message = enqueue.Message });
+    }
+
+    command = enqueue.Command!;
     agent = agent with { Status = "stopping" };
     await agentStore.UpsertAgentAsync(agent, cancellationToken);
     return Results.Ok(agent);
@@ -307,7 +344,7 @@ app.MapPost("/api/agents/{agentId}/sessions", async (
     {
         return Results.Conflict(new { message = $"Agent {agentId} is {agent.Status}." });
     }
-    var heartbeat = await runnerStore.GetRunnerHeartbeatAsync(agent.ControllerId, cancellationToken);
+    var heartbeat = await runnerStore.GetControllerHeartbeatAsync(agent.ControllerId, cancellationToken);
     if (heartbeat is null || !AgentControllerRecord.IsActive(heartbeat))
     {
         return Results.Conflict(new { message = $"Agent controller {agent.ControllerId} is not active." });
@@ -320,16 +357,21 @@ app.MapPost("/api/agents/{agentId}/sessions", async (
         AgentChatSessionSpec.FromSession(session),
         "application/vnd.tradecraft.agent-chat-session-spec+json",
         cancellationToken);
-    var command = RunnerCommandFactory.Create(
-        session.Id,
-        RunnerCommandTypes.CreateAgentSession,
+    var command = ControllerCommandFactory.Create(
+        ControllerCommandTypes.CreateAgentSession,
         payloadRef,
         correlationId: session.Id,
         idempotencyKey: session.Id,
         runnerId: agent.ControllerId,
         agentId: agent.Id,
         sessionId: session.Id);
-    await runnerStore.EnqueueCommandAsync(command, cancellationToken);
+    var enqueue = await runnerStore.EnqueueCommandAsync(command, cancellationToken);
+    if (enqueue.Status == ControllerCommandEnqueueStatus.Conflict)
+    {
+        return Results.Conflict(new { message = enqueue.Message });
+    }
+
+    command = enqueue.Command!;
     await PublishAsync(sessionStore, hub, session.Id, null, "agent_session.command_queued", command, cancellationToken);
     return Results.Created($"/api/agent-sessions/{session.Id}", session);
 });
@@ -365,16 +407,21 @@ app.MapPost("/api/agent-sessions/{sessionId}/turns", async (
 
     var turnRequest = AgentTurnRequest.FromTurn(turn, session.AgentId);
     var payloadRef = await runnerStore.SaveJsonContentAsync(turnRequest, "application/vnd.tradecraft.agent-turn-request+json", cancellationToken);
-    var command = RunnerCommandFactory.Create(
-        sessionId,
-        RunnerCommandTypes.SubmitAgentTurn,
+    var command = ControllerCommandFactory.Create(
+        ControllerCommandTypes.StartInvocation,
         payloadRef,
         correlationId: turn.Id,
         idempotencyKey: turn.Id,
         runnerId: session.ControllerId,
         agentId: session.AgentId,
         sessionId: session.Id);
-    await runnerStore.EnqueueCommandAsync(command, cancellationToken);
+    var enqueue = await runnerStore.EnqueueCommandAsync(command, cancellationToken);
+    if (enqueue.Status == ControllerCommandEnqueueStatus.Conflict)
+    {
+        return Results.Conflict(new { message = enqueue.Message });
+    }
+
+    command = enqueue.Command!;
     await PublishAsync(store, hub, sessionId, turn.Id, "agent_turn.command_queued", command, cancellationToken);
 
     return Results.Created($"/api/agent-sessions/{sessionId}/turns/{turn.Id}", turn);
@@ -417,9 +464,8 @@ app.MapPost("/api/agent-sessions/{sessionId}/history/sync", async (
     }
 
     var commandId = Ids.New("cmd");
-    var command = RunnerCommandFactory.Create(
-        sessionId,
-        RunnerCommandTypes.SyncAgentSessionHistory,
+    var command = ControllerCommandFactory.Create(
+        ControllerCommandTypes.SynchronizeSessionHistory,
         payloadRef: null,
         correlationId: sessionId,
         idempotencyKey: $"history:{sessionId}:{commandId}",
@@ -427,7 +473,13 @@ app.MapPost("/api/agent-sessions/{sessionId}/history/sync", async (
         agentId: session.AgentId,
         sessionId: sessionId,
         commandId: commandId);
-    await runnerStore.EnqueueCommandAsync(command, cancellationToken);
+    var enqueue = await runnerStore.EnqueueCommandAsync(command, cancellationToken);
+    if (enqueue.Status == ControllerCommandEnqueueStatus.Conflict)
+    {
+        return Results.Conflict(new { message = enqueue.Message });
+    }
+
+    command = enqueue.Command!;
     await PublishAsync(
         store,
         hub,
@@ -436,7 +488,9 @@ app.MapPost("/api/agent-sessions/{sessionId}/history/sync", async (
         "agent_session.history_sync_queued",
         command,
         cancellationToken);
-    return Results.Accepted($"/api/runner/commands/{command.Id}", command);
+    return Results.Accepted(
+        $"/api/v1/controllers/{session.ControllerId}/commands/{command.CommandId}",
+        command);
 });
 
 app.MapGet("/api/agent-sessions/{sessionId}/events", async (
@@ -464,16 +518,21 @@ app.MapPost("/api/agent-sessions/{sessionId}/cancel", async (
 
     var payload = new { reason = request.Reason ?? "Cancelled by operator." };
     var payloadRef = await runnerStore.SaveJsonContentAsync(payload, "application/vnd.tradecraft.agent-session-cancel+json", cancellationToken);
-    var command = RunnerCommandFactory.Create(
-        sessionId,
-        RunnerCommandTypes.CancelAgentSession,
+    var command = ControllerCommandFactory.Create(
+        ControllerCommandTypes.CloseAgentSession,
         payloadRef,
         correlationId: sessionId,
         idempotencyKey: $"cancel:{sessionId}",
         runnerId: session.ControllerId,
         agentId: session.AgentId,
         sessionId: session.Id);
-    await runnerStore.EnqueueCommandAsync(command, cancellationToken);
+    var enqueue = await runnerStore.EnqueueCommandAsync(command, cancellationToken);
+    if (enqueue.Status == ControllerCommandEnqueueStatus.Conflict)
+    {
+        return Results.Conflict(new { message = enqueue.Message });
+    }
+
+    command = enqueue.Command!;
     session = session with { Status = "cancelling", EndedAt = DateTimeOffset.UtcNow };
     await store.UpsertSessionAsync(session, cancellationToken);
     await PublishAsync(store, hub, sessionId, null, "agent_session.cancel_command_queued", command, cancellationToken);
@@ -499,48 +558,50 @@ static TimeSpan ParseLongPollWait(string? wait)
         : TimeSpan.FromSeconds(30);
 }
 
-static async Task ApplyRunnerEventAsync(
-    RunnerEventEnvelope runnerEvent,
+static async Task ApplyControllerEventAsync(
+    ControllerEvent controllerEvent,
     RunnerControlStore runnerStore,
     AgentStore agentStore,
     AgentSessionStore sessionStore,
     CancellationToken cancellationToken)
 {
-    switch (runnerEvent.Type)
+    switch (controllerEvent.EventType)
     {
-        case RunnerEventTypes.AgentReady:
-        case RunnerEventTypes.AgentFailed:
-        case RunnerEventTypes.AgentStopped:
+        case ControllerEventTypes.AgentRuntimeReady:
+        case ControllerEventTypes.AgentRuntimeLost:
+        case ControllerEventTypes.AgentRuntimeStopped:
         {
-            if (runnerEvent.AgentId is null)
+            if (controllerEvent.Target.RuntimeId is not { } runtimeId)
             {
                 break;
             }
-            var agent = await agentStore.GetAgentAsync(runnerEvent.AgentId, cancellationToken);
+            var agent = await agentStore.GetAgentAsync(runtimeId, cancellationToken);
             if (agent is not null)
             {
-                var status = runnerEvent.Type switch
+                var status = controllerEvent.EventType switch
                 {
-                    RunnerEventTypes.AgentReady => "ready",
-                    RunnerEventTypes.AgentStopped => "stopped",
+                    ControllerEventTypes.AgentRuntimeReady => "ready",
+                    ControllerEventTypes.AgentRuntimeStopped => "stopped",
                     _ => "failed"
                 };
                 await agentStore.UpsertAgentAsync(
                     agent with
                     {
                         Status = status,
-                        ReadyAt = status == "ready" ? runnerEvent.CreatedAt : agent.ReadyAt,
-                        EndedAt = status is "stopped" or "failed" ? runnerEvent.CreatedAt : agent.EndedAt
+                        ReadyAt = status == "ready" ? controllerEvent.OccurredAt : agent.ReadyAt,
+                        EndedAt = status is "stopped" or "failed"
+                            ? controllerEvent.OccurredAt
+                            : agent.EndedAt
                     },
                     cancellationToken);
             }
             break;
         }
 
-        case RunnerEventTypes.AgentSessionCreated:
-        case RunnerEventTypes.AgentSessionReady:
+        case ControllerEventTypes.AgentSessionCreated:
         {
-            var sessionId = runnerEvent.SessionId ?? runnerEvent.AgentSessionId;
+            var sessionId = controllerEvent.Target.AgentSessionId
+                            ?? controllerEvent.Aggregate.Id;
             var session = await sessionStore.GetSessionAsync(sessionId, cancellationToken);
             if (session is not null)
             {
@@ -548,7 +609,7 @@ static async Task ApplyRunnerEventAsync(
                     session with
                     {
                         Status = "ready",
-                        ReadyAt = runnerEvent.CreatedAt,
+                        ReadyAt = controllerEvent.OccurredAt,
                         FailedAt = null,
                         FailureSummary = null
                     },
@@ -557,42 +618,38 @@ static async Task ApplyRunnerEventAsync(
             break;
         }
 
-        case RunnerEventTypes.AgentSessionFailed:
+        case ControllerEventTypes.AgentSessionClosed:
         {
-            var sessionId = runnerEvent.SessionId ?? runnerEvent.AgentSessionId;
+            var sessionId = controllerEvent.Target.AgentSessionId
+                            ?? controllerEvent.Aggregate.Id;
             var session = await sessionStore.GetSessionAsync(sessionId, cancellationToken);
             if (session is not null)
             {
+                var cancelled = session.Status == "cancelling";
                 await sessionStore.UpsertSessionAsync(
                     session with
                     {
-                        Status = "failed",
-                        FailedAt = runnerEvent.CreatedAt,
-                        FailureSummary = await PayloadSummaryAsync(runnerStore, runnerEvent.PayloadRef, "Agent session failed.", cancellationToken)
+                        Status = cancelled ? "cancelled" : "failed",
+                        EndedAt = controllerEvent.OccurredAt,
+                        FailedAt = cancelled ? null : controllerEvent.OccurredAt,
+                        FailureSummary = cancelled
+                            ? null
+                            : await PayloadSummaryAsync(
+                                runnerStore,
+                                controllerEvent.PayloadRef,
+                                "Agent session failed.",
+                                cancellationToken)
                     },
                     cancellationToken);
             }
             break;
         }
 
-        case "agent_session.cancelled":
-        {
-            var sessionId = runnerEvent.SessionId ?? runnerEvent.AgentSessionId;
-            var session = await sessionStore.GetSessionAsync(sessionId, cancellationToken);
-            if (session is not null)
-            {
-                await sessionStore.UpsertSessionAsync(
-                    session with { Status = "cancelled", EndedAt = runnerEvent.CreatedAt },
-                    cancellationToken);
-            }
-            break;
-        }
-
-        case RunnerEventTypes.AgentSessionHistorySynced:
+        case ControllerEventTypes.AgentSessionHistorySynchronized:
         {
             var history = await PayloadJsonAsync<AgentChatHistory>(
                 runnerStore,
-                runnerEvent.PayloadRef,
+                controllerEvent.PayloadRef,
                 cancellationToken);
             if (history is not null)
             {
@@ -601,28 +658,53 @@ static async Task ApplyRunnerEventAsync(
             break;
         }
 
-        case RunnerEventTypes.AgentSessionHistorySyncFailed:
+        case ControllerEventTypes.AgentSessionHistorySynchronizationFailed:
             break;
 
-        case RunnerEventTypes.AgentTurnCompleted:
+        case ControllerEventTypes.OutcomeReported:
         {
+            var invocationId = ControllerEventInvocationId(controllerEvent);
+            var sessionId = controllerEvent.Target.AgentSessionId;
+            if (sessionId is null || invocationId is null)
+            {
+                break;
+            }
+
             var turn = await sessionStore.GetTurnAsync(
-                runnerEvent.SessionId ?? runnerEvent.AgentSessionId,
-                runnerEvent.CorrelationId,
+                sessionId,
+                invocationId,
                 cancellationToken);
             if (turn is null)
             {
                 break;
             }
 
-            var result = await PayloadJsonAsync<AgentTurnResult>(runnerStore, runnerEvent.PayloadRef, cancellationToken);
+            var result = controllerEvent.PayloadRef?.ContentType.StartsWith(
+                "application/vnd.tradecraft.agent-turn-result+json",
+                StringComparison.OrdinalIgnoreCase) == true
+                    ? await PayloadJsonAsync<AgentTurnResult>(
+                        runnerStore,
+                        controllerEvent.PayloadRef,
+                        cancellationToken)
+                    : null;
+            var failed = result is null
+                         || !result.Status.Equals(
+                             "completed",
+                             StringComparison.OrdinalIgnoreCase);
             await sessionStore.UpsertTurnAsync(
                 turn with
                 {
-                    Status = result?.Status ?? "completed",
-                    CompletedAt = runnerEvent.CreatedAt,
+                    Status = result?.Status ?? "failed",
+                    CompletedAt = controllerEvent.OccurredAt,
                     Response = result?.Message,
-                    FailureSummary = result?.FailureReport?.Summary,
+                    FailureSummary = result?.FailureReport?.Summary
+                        ?? (failed
+                            ? await PayloadSummaryAsync(
+                                runnerStore,
+                                controllerEvent.PayloadRef,
+                                "Agent turn failed.",
+                                cancellationToken)
+                            : null),
                     FailureDetail = result?.FailureReport?.Detail,
                     Diagnostics = result?.Diagnostics
                 },
@@ -630,47 +712,12 @@ static async Task ApplyRunnerEventAsync(
             break;
         }
 
-        case RunnerEventTypes.AgentTurnFailed:
-        {
-            var turn = await sessionStore.GetTurnAsync(
-                runnerEvent.SessionId ?? runnerEvent.AgentSessionId,
-                runnerEvent.CorrelationId,
-                cancellationToken);
-            if (turn is not null)
-            {
-                var result = runnerEvent.PayloadRef?.ContentType.StartsWith(
-                    "application/vnd.tradecraft.agent-turn-result+json",
-                    StringComparison.OrdinalIgnoreCase) == true
-                        ? await PayloadJsonAsync<AgentTurnResult>(
-                            runnerStore,
-                            runnerEvent.PayloadRef,
-                            cancellationToken)
-                        : null;
-                await sessionStore.UpsertTurnAsync(
-                    turn with
-                    {
-                        Status = "failed",
-                        CompletedAt = runnerEvent.CreatedAt,
-                        Response = result?.Message,
-                        FailureSummary = result?.FailureReport?.Summary
-                            ?? await PayloadSummaryAsync(
-                                runnerStore,
-                                runnerEvent.PayloadRef,
-                                "Agent turn failed.",
-                                cancellationToken),
-                        FailureDetail = result?.FailureReport?.Detail,
-                        Diagnostics = result?.Diagnostics
-                    },
-                    cancellationToken);
-            }
-            break;
-        }
     }
 }
 
 static async Task<T?> PayloadJsonAsync<T>(
     RunnerControlStore runnerStore,
-    ClaimCheckContentRef? payloadRef,
+    ContentReference? payloadRef,
     CancellationToken cancellationToken)
 {
     if (payloadRef is null)
@@ -686,7 +733,7 @@ static async Task<T?> PayloadJsonAsync<T>(
 
 static async Task<string> PayloadSummaryAsync(
     RunnerControlStore runnerStore,
-    ClaimCheckContentRef? payloadRef,
+    ContentReference? payloadRef,
     string fallback,
     CancellationToken cancellationToken)
 {
@@ -707,16 +754,39 @@ static async Task<string> PayloadSummaryAsync(
         : text.Length <= 500 ? text : text[..500];
 }
 
-static string ContentId(ClaimCheckContentRef contentRef)
+static string ContentId(ContentReference contentRef)
 {
     return contentRef.Uri.Split('/', StringSplitOptions.RemoveEmptyEntries).Last();
 }
 
-static string? RunnerEventTurnId(RunnerEventEnvelope runnerEvent)
+static string? ControllerEventInvocationId(ControllerEvent controllerEvent)
 {
-    return runnerEvent.Type.StartsWith("agent_turn.", StringComparison.Ordinal)
-        ? runnerEvent.CorrelationId
-        : null;
+    return controllerEvent.Target.InvocationId
+           ?? controllerEvent.Correlation.InvocationId;
+}
+
+static string UiEventType(ControllerEvent controllerEvent)
+{
+    return controllerEvent.EventType switch
+    {
+        ControllerEventTypes.AgentSessionHistorySynchronized =>
+            "agent_session.history_synced",
+        ControllerEventTypes.AgentSessionHistorySynchronizationFailed =>
+            "agent_session.history_sync_failed",
+        ControllerEventTypes.OutcomeReported =>
+            "agent_turn.completed",
+        ControllerEventTypes.AgentRuntimeReady =>
+            "agent.ready",
+        ControllerEventTypes.AgentRuntimeStopped =>
+            "agent.stopped",
+        ControllerEventTypes.AgentRuntimeLost =>
+            "agent.failed",
+        ControllerEventTypes.AgentSessionCreated =>
+            "agent_session.ready",
+        ControllerEventTypes.AgentSessionClosed =>
+            "agent_session.closed",
+        _ => controllerEvent.EventType
+    };
 }
 
 static async Task PublishAsync(
@@ -913,7 +983,7 @@ public sealed class AgentStore
 
     public async Task<bool> UpsertInventoryAgentAsync(
         string runnerId,
-        RunnerAgentInventoryItem inventory,
+        ControllerInventoryObservation inventory,
         CancellationToken cancellationToken)
     {
         var agentId = inventory.AgentId ?? inventory.AgentSessionId;
@@ -972,7 +1042,7 @@ public sealed class AgentSessionStore
     public async Task UpsertInventorySessionAsync(
         string runnerId,
         string agentId,
-        RunnerAgentSessionInventoryItem inventory,
+        ControllerSessionObservation inventory,
         string workspacePath,
         CancellationToken cancellationToken)
     {
@@ -1010,7 +1080,7 @@ public sealed class AgentSessionStore
 
     public async Task UpsertInventorySessionAsync(
         string runnerId,
-        RunnerAgentInventoryItem agent,
+        ControllerInventoryObservation agent,
         CancellationToken cancellationToken)
     {
         if (_sessions.TryGetValue(agent.AgentSessionId, out var existing))
@@ -1165,10 +1235,17 @@ public sealed class AgentSessionStore
 
 public sealed class RunnerControlStore
 {
-    private readonly ConcurrentDictionary<string, RunnerCommandEnvelope> _commands = new();
-    private readonly ConcurrentBag<RunnerEventEnvelope> _events = [];
+    private static readonly TimeSpan DefaultLeaseDuration = TimeSpan.FromSeconds(60);
+    private readonly SemaphoreSlim _commandMutationLock = new(1, 1);
+    private readonly ConcurrentDictionary<string, ControllerCommand> _commands = new();
+    private readonly ConcurrentDictionary<string, ControllerCommandIdempotencyRecord>
+        _idempotencyRecords = new();
+    private readonly ConcurrentDictionary<string, ControllerCommandAcknowledgement>
+        _acknowledgements = new();
+    private readonly ConcurrentDictionary<string, ControllerCommandCompletion> _completions = new();
+    private readonly ConcurrentBag<ControllerEvent> _events = [];
     private readonly ConcurrentDictionary<string, StoredClaimCheckContent> _content = new();
-    private readonly ConcurrentDictionary<string, RunnerHeartbeat> _runnerHeartbeats = new();
+    private readonly ConcurrentDictionary<string, ControllerHeartbeat> _controllerHeartbeats = new();
     private readonly string _runtimeRoot;
 
     public RunnerControlStore() : this(RuntimePaths.Root)
@@ -1179,111 +1256,254 @@ public sealed class RunnerControlStore
     {
         _runtimeRoot = runtimeRoot;
         LoadCommands();
+        LoadIdempotencyRecords();
+        LoadAcknowledgements();
+        LoadCompletions();
         LoadEvents();
         LoadContentMetadata();
-        LoadRunnerHeartbeats();
+        LoadControllerHeartbeats();
     }
 
-    public Task EnqueueCommandAsync(RunnerCommandEnvelope command, CancellationToken cancellationToken)
+    public async Task<ControllerCommandEnqueueResult> EnqueueCommandAsync(
+        ControllerCommand command,
+        CancellationToken cancellationToken)
     {
-        _commands[command.Id] = command;
-        return WriteJsonAsync(CommandPath(command.Id), command, cancellationToken);
+        var scope = ControllerCommandIdempotency.Scope(command);
+        var fingerprint = ControllerCommandIdempotency.Fingerprint(command);
+        await _commandMutationLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (_idempotencyRecords.TryGetValue(scope, out var existingRecord))
+            {
+                if (!existingRecord.Fingerprint.Equals(
+                        fingerprint,
+                        StringComparison.Ordinal))
+                {
+                    return ControllerCommandEnqueueResult.Conflict(
+                        $"Idempotency key '{command.IdempotencyKey}' was already used " +
+                        $"for a different {command.CommandType} command in controller " +
+                        $"scope '{command.Target.ControllerId ?? "*"}'.");
+                }
+
+                if (!_commands.TryGetValue(
+                        existingRecord.Command.CommandId,
+                        out var existing))
+                {
+                    existing = existingRecord.Command;
+                    _commands[existing.CommandId] = existing;
+                }
+
+                if (!File.Exists(CommandPath(existing.CommandId)))
+                {
+                    await WriteJsonAsync(
+                        CommandPath(existing.CommandId),
+                        existing,
+                        cancellationToken);
+                }
+
+                _completions.TryGetValue(existing.CommandId, out var completion);
+                return ControllerCommandEnqueueResult.Replayed(existing, completion);
+            }
+
+            var record = new ControllerCommandIdempotencyRecord(
+                scope,
+                fingerprint,
+                command,
+                DateTimeOffset.UtcNow);
+            await WriteJsonAsync(
+                IdempotencyPath(scope),
+                record,
+                cancellationToken);
+            await WriteJsonAsync(
+                CommandPath(command.CommandId),
+                command,
+                cancellationToken);
+            _commands[command.CommandId] = command;
+            _idempotencyRecords[scope] = record;
+            return ControllerCommandEnqueueResult.Accepted(command);
+        }
+        finally
+        {
+            _commandMutationLock.Release();
+        }
     }
 
-    public Task<IReadOnlyCollection<RunnerCommandEnvelope>> GetAvailableCommandsAsync(string runnerId, CancellationToken cancellationToken)
+    public Task<IReadOnlyCollection<ControllerCommand>> GetAvailableCommandsAsync(
+        string controllerId,
+        CancellationToken cancellationToken)
     {
         var now = DateTimeOffset.UtcNow;
         var commands = _commands.Values
-            .Where(command => command.Status == RunnerCommandStatuses.Pending)
-            .Where(command => command.AvailableAt <= now)
-            .Where(command => command.RunnerId is null || command.RunnerId == runnerId)
-            .Where(command => command.Lease is null || command.Lease.ExpiresAt <= now)
-            .OrderBy(command => command.CreatedAt)
+            .Where(command => !_completions.ContainsKey(command.CommandId))
+            .Where(command => command.AvailableAt is null || command.AvailableAt <= now)
+            .Where(command => command.Target.ControllerId is null
+                              || command.Target.ControllerId == controllerId)
+            .Where(command => command.Execution.Lease is null
+                              || command.Execution.Lease.ExpiresAt <= now)
+            .OrderBy(command => command.IssuedAt)
             .ToArray();
-        return Task.FromResult<IReadOnlyCollection<RunnerCommandEnvelope>>(commands);
+        return Task.FromResult<IReadOnlyCollection<ControllerCommand>>(commands);
     }
 
-    public async Task<RunnerCommandMutationResult> ClaimCommandAsync(
-        string commandId,
-        ClaimRunnerCommandRequest request,
+    public async Task<ControllerCommandMutationResult> AcknowledgeCommandAsync(
+        ControllerCommandAcknowledgement acknowledgement,
         CancellationToken cancellationToken)
     {
-        if (!_commands.TryGetValue(commandId, out var command))
+        await _commandMutationLock.WaitAsync(cancellationToken);
+        try
         {
-            return RunnerCommandMutationResult.NotFound();
-        }
+            if (!_commands.TryGetValue(acknowledgement.CommandId, out var command))
+            {
+                return ControllerCommandMutationResult.NotFound();
+            }
 
-        var now = DateTimeOffset.UtcNow;
-        if (command.Lease is not null && command.Lease.ExpiresAt > now && command.Lease.RunnerId != request.RunnerId)
-        {
-            return RunnerCommandMutationResult.Conflict("Command is leased by another runner.");
-        }
+            if (_acknowledgements.TryGetValue(
+                    acknowledgement.CommandId,
+                    out var existingAcknowledgement))
+            {
+                return AcknowledgementsEquivalent(
+                    existingAcknowledgement,
+                    acknowledgement)
+                    ? ControllerCommandMutationResult.Ok(
+                        command,
+                        acknowledgement: existingAcknowledgement)
+                    : ControllerCommandMutationResult.Conflict(
+                        "Command acknowledgement conflicts with the first accepted " +
+                        "acknowledgement.");
+            }
 
-        if (command.Status is RunnerCommandStatuses.Completed or RunnerCommandStatuses.Cancelled)
-        {
-            return RunnerCommandMutationResult.Conflict($"Command is already {command.Status}.");
-        }
+            if (_completions.ContainsKey(command.CommandId))
+            {
+                return ControllerCommandMutationResult.Conflict(
+                    "Command is already complete.");
+            }
 
-        var lease = new RunnerCommandLease(
-            LeaseId: Ids.New("lease"),
-            RunnerId: request.RunnerId,
-            ClaimedAt: now,
-            ExpiresAt: now.AddSeconds(Math.Clamp(request.LeaseSeconds, 1, 3600)),
-            Attempt: (command.Lease?.Attempt ?? 0) + 1);
-        var claimed = command with
+            if (acknowledgement.Status != CommandAcknowledgementStatuses.Accepted)
+            {
+                return ControllerCommandMutationResult.Conflict(
+                    "The POC command loop must accept a command before execution.");
+            }
+
+            var now = DateTimeOffset.UtcNow;
+            var currentLease = command.Execution.Lease;
+            if (currentLease is not null
+                && currentLease.ExpiresAt > now
+                && currentLease.ControllerId != acknowledgement.ControllerId)
+            {
+                return ControllerCommandMutationResult.Conflict(
+                    "Command is leased by another controller.");
+            }
+
+            var lease = new CommandLease(
+                LeaseId: Ids.New("lease"),
+                ControllerId: acknowledgement.ControllerId,
+                AcquiredAt: now,
+                ExpiresAt: Min(now + DefaultLeaseDuration, command.Execution.Deadline),
+                Attempt: (currentLease?.Attempt ?? 0) + 1,
+                FencingToken: (currentLease?.FencingToken ?? 0) + 1);
+            var claimed = command with
+            {
+                Target = command.Target with
+                {
+                    ControllerId = acknowledgement.ControllerId
+                },
+                Execution = command.Execution with { Lease = lease }
+            };
+            var accepted = acknowledgement with
+            {
+                Correlation = command.Correlation,
+                Lease = lease
+            };
+            await WriteJsonAsync(
+                CommandPath(command.CommandId),
+                claimed,
+                cancellationToken);
+            await WriteJsonAsync(
+                AcknowledgementPath(command.CommandId),
+                accepted,
+                cancellationToken);
+            _commands[command.CommandId] = claimed;
+            _acknowledgements[command.CommandId] = accepted;
+            return ControllerCommandMutationResult.Ok(
+                claimed,
+                acknowledgement: accepted);
+        }
+        finally
         {
-            RunnerId = request.RunnerId,
-            Status = RunnerCommandStatuses.Claimed,
-            Lease = lease
-        };
-        _commands[commandId] = claimed;
-        await WriteJsonAsync(CommandPath(commandId), claimed, cancellationToken);
-        return RunnerCommandMutationResult.Ok(claimed);
+            _commandMutationLock.Release();
+        }
     }
 
-    public async Task<RunnerCommandMutationResult> CompleteCommandAsync(
-        string commandId,
-        CompleteRunnerCommandRequest request,
+    public async Task<ControllerCommandMutationResult> CompleteCommandAsync(
+        ControllerCommandCompletion completion,
         CancellationToken cancellationToken)
     {
-        if (!_commands.TryGetValue(commandId, out var command))
+        await _commandMutationLock.WaitAsync(cancellationToken);
+        try
         {
-            return RunnerCommandMutationResult.NotFound();
-        }
+            if (!_commands.TryGetValue(completion.CommandId, out var command))
+            {
+                return ControllerCommandMutationResult.NotFound();
+            }
 
-        if (command.Lease is null || command.Lease.LeaseId != request.LeaseId || command.Lease.RunnerId != request.RunnerId)
-        {
-            return RunnerCommandMutationResult.Conflict("Command lease does not match completion request.");
-        }
+            if (_completions.TryGetValue(
+                    completion.CommandId,
+                    out var existingCompletion))
+            {
+                return CompletionsEquivalent(existingCompletion, completion)
+                    ? ControllerCommandMutationResult.Ok(
+                        command,
+                        completion: existingCompletion)
+                    : ControllerCommandMutationResult.Conflict(
+                        "Command completion conflicts with the first terminal result.");
+            }
 
-        var completed = command with
+            var lease = command.Execution.Lease;
+            if (lease is null
+                || lease.ControllerId != completion.ControllerId
+                || lease.FencingToken != completion.FencingToken)
+            {
+                return ControllerCommandMutationResult.Conflict(
+                    "Command lease does not match completion.");
+            }
+
+            await WriteJsonAsync(
+                CompletionPath(completion.CommandId),
+                completion,
+                cancellationToken);
+            _completions[completion.CommandId] = completion;
+            return ControllerCommandMutationResult.Ok(
+                command,
+                completion: completion);
+        }
+        finally
         {
-            Status = request.Status,
-            Lease = null
-        };
-        _commands[commandId] = completed;
-        await WriteJsonAsync(CommandPath(commandId), completed, cancellationToken);
-        return RunnerCommandMutationResult.Ok(completed);
+            _commandMutationLock.Release();
+        }
     }
 
-    public async Task AddEventAsync(RunnerEventEnvelope runnerEvent, CancellationToken cancellationToken)
+    public async Task AddEventAsync(
+        ControllerEvent controllerEvent,
+        CancellationToken cancellationToken)
     {
-        _events.Add(runnerEvent);
-        var path = RunnerEventsPath();
+        _events.Add(controllerEvent);
+        var path = ControllerEventsPath();
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         await File.AppendAllTextAsync(
             path,
-            JsonSerializer.Serialize(runnerEvent, JsonLineOptions) + Environment.NewLine,
+            JsonSerializer.Serialize(controllerEvent, JsonLineOptions) + Environment.NewLine,
             cancellationToken);
     }
 
-    public Task<IReadOnlyCollection<RunnerEventEnvelope>> GetEventsAsync(CancellationToken cancellationToken)
+    public Task<IReadOnlyCollection<ControllerEvent>> GetEventsAsync(
+        CancellationToken cancellationToken)
     {
-        return Task.FromResult<IReadOnlyCollection<RunnerEventEnvelope>>(_events.OrderBy(e => e.CreatedAt).ToArray());
+        return Task.FromResult<IReadOnlyCollection<ControllerEvent>>(
+            _events.OrderBy(e => e.OccurredAt).ToArray());
     }
 
-    public async Task<ClaimCheckContentUploadResponse> SaveContentAsync(
-        ClaimCheckContentUploadRequest request,
+    public async Task<ControllerContentUploadResponse> SaveContentAsync(
+        ControllerContentUploadRequest request,
         CancellationToken cancellationToken)
     {
         var bytes = Convert.FromBase64String(request.ContentBase64);
@@ -1299,7 +1519,7 @@ public sealed class RunnerControlStore
         }
 
         var contentId = Ids.New("content");
-        var contentRef = new ClaimCheckContentRef(
+        var contentRef = new ContentReference(
             Uri: $"tradecraft://content/{contentId}",
             Sha256: actualSha,
             ContentType: request.ContentType,
@@ -1308,17 +1528,19 @@ public sealed class RunnerControlStore
         Directory.CreateDirectory(ContentRoot());
         await File.WriteAllBytesAsync(ContentBlobPath(contentId), bytes, cancellationToken);
         await WriteJsonAsync(ContentMetadataPath(contentId), contentRef, cancellationToken);
-        return new ClaimCheckContentUploadResponse(contentRef);
+        return new ControllerContentUploadResponse(contentRef);
     }
 
-    public async Task<ClaimCheckContentRef> SaveJsonContentAsync<T>(
+    public async Task<ContentReference> SaveJsonContentAsync<T>(
         T value,
         string contentType,
         CancellationToken cancellationToken)
     {
-        var bytes = JsonSerializer.SerializeToUtf8Bytes(value, RunnerProtocolJson.Options);
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(
+            value,
+            ControllerProtocolJson.Options);
         var sha = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
-        var upload = new ClaimCheckContentUploadRequest(
+        var upload = new ControllerContentUploadRequest(
             ContentType: contentType,
             Sha256: sha,
             Length: bytes.LongLength,
@@ -1341,31 +1563,41 @@ public sealed class RunnerControlStore
             return null;
         }
 
-        var contentRef = await ReadJsonAsync<ClaimCheckContentRef>(metadataPath, cancellationToken);
+        var contentRef = await ReadJsonAsync<ContentReference>(
+            metadataPath,
+            cancellationToken);
         var bytes = await File.ReadAllBytesAsync(blobPath, cancellationToken);
         content = new StoredClaimCheckContent(contentRef, bytes);
         _content[contentId] = content;
         return content;
     }
 
-    public Task UpsertRunnerHeartbeatAsync(RunnerHeartbeat heartbeat, CancellationToken cancellationToken)
+    public Task UpsertControllerHeartbeatAsync(
+        ControllerHeartbeat heartbeat,
+        CancellationToken cancellationToken)
     {
-        _runnerHeartbeats[heartbeat.RunnerId] = heartbeat;
-        return WriteJsonAsync(RunnerHeartbeatPath(heartbeat.RunnerId), heartbeat, cancellationToken);
+        _controllerHeartbeats[heartbeat.ControllerId] = heartbeat;
+        return WriteJsonAsync(
+            ControllerHeartbeatPath(heartbeat.ControllerId),
+            heartbeat,
+            cancellationToken);
     }
 
-    public Task<RunnerHeartbeat?> GetRunnerHeartbeatAsync(string runnerId, CancellationToken cancellationToken)
+    public Task<ControllerHeartbeat?> GetControllerHeartbeatAsync(
+        string controllerId,
+        CancellationToken cancellationToken)
     {
-        _runnerHeartbeats.TryGetValue(runnerId, out var heartbeat);
+        _controllerHeartbeats.TryGetValue(controllerId, out var heartbeat);
         return Task.FromResult(heartbeat);
     }
 
-    public Task<IReadOnlyCollection<RunnerHeartbeat>> GetRunnerHeartbeatsAsync(CancellationToken cancellationToken)
+    public Task<IReadOnlyCollection<ControllerHeartbeat>> GetControllerHeartbeatsAsync(
+        CancellationToken cancellationToken)
     {
-        var heartbeats = _runnerHeartbeats.Values
-            .OrderBy(heartbeat => heartbeat.RunnerId, StringComparer.Ordinal)
+        var heartbeats = _controllerHeartbeats.Values
+            .OrderBy(heartbeat => heartbeat.ControllerId, StringComparer.Ordinal)
             .ToArray();
-        return Task.FromResult<IReadOnlyCollection<RunnerHeartbeat>>(heartbeats);
+        return Task.FromResult<IReadOnlyCollection<ControllerHeartbeat>>(heartbeats);
     }
 
     private void LoadCommands()
@@ -1378,17 +1610,81 @@ public sealed class RunnerControlStore
 
         foreach (var path in Directory.EnumerateFiles(root, "*.json"))
         {
-            var command = JsonSerializer.Deserialize<RunnerCommandEnvelope>(File.ReadAllText(path), RunnerProtocolJson.Options);
+            var command = JsonSerializer.Deserialize<ControllerCommand>(
+                File.ReadAllText(path),
+                ControllerProtocolJson.Options);
             if (command is not null)
             {
-                _commands[command.Id] = command;
+                _commands[command.CommandId] = command;
+            }
+        }
+    }
+
+    private void LoadIdempotencyRecords()
+    {
+        var root = IdempotencyRoot();
+        if (!Directory.Exists(root))
+        {
+            return;
+        }
+
+        foreach (var path in Directory.EnumerateFiles(root, "*.json"))
+        {
+            var record = JsonSerializer.Deserialize<ControllerCommandIdempotencyRecord>(
+                File.ReadAllText(path),
+                ControllerProtocolJson.Options);
+            if (record is not null)
+            {
+                _idempotencyRecords[record.Scope] = record;
+                _commands.TryAdd(record.Command.CommandId, record.Command);
+            }
+        }
+    }
+
+    private void LoadAcknowledgements()
+    {
+        var root = AcknowledgementRoot();
+        if (!Directory.Exists(root))
+        {
+            return;
+        }
+
+        foreach (var path in Directory.EnumerateFiles(root, "*.json"))
+        {
+            var acknowledgement =
+                JsonSerializer.Deserialize<ControllerCommandAcknowledgement>(
+                    File.ReadAllText(path),
+                    ControllerProtocolJson.Options);
+            if (acknowledgement is not null)
+            {
+                _acknowledgements[acknowledgement.CommandId] = acknowledgement;
+            }
+        }
+    }
+
+    private void LoadCompletions()
+    {
+        var root = CompletionRoot();
+        if (!Directory.Exists(root))
+        {
+            return;
+        }
+
+        foreach (var path in Directory.EnumerateFiles(root, "*.json"))
+        {
+            var completion = JsonSerializer.Deserialize<ControllerCommandCompletion>(
+                File.ReadAllText(path),
+                ControllerProtocolJson.Options);
+            if (completion is not null)
+            {
+                _completions[completion.CommandId] = completion;
             }
         }
     }
 
     private void LoadEvents()
     {
-        var path = RunnerEventsPath();
+        var path = ControllerEventsPath();
         if (!File.Exists(path))
         {
             return;
@@ -1396,10 +1692,12 @@ public sealed class RunnerControlStore
 
         foreach (var line in File.ReadLines(path).Where(line => !string.IsNullOrWhiteSpace(line)))
         {
-            var runnerEvent = JsonSerializer.Deserialize<RunnerEventEnvelope>(line, RunnerProtocolJson.Options);
-            if (runnerEvent is not null)
+            var controllerEvent = JsonSerializer.Deserialize<ControllerEvent>(
+                line,
+                ControllerProtocolJson.Options);
+            if (controllerEvent is not null)
             {
-                _events.Add(runnerEvent);
+                _events.Add(controllerEvent);
             }
         }
     }
@@ -1416,7 +1714,9 @@ public sealed class RunnerControlStore
         {
             var contentId = Path.GetFileNameWithoutExtension(path);
             var blobPath = ContentBlobPath(contentId);
-            var contentRef = JsonSerializer.Deserialize<ClaimCheckContentRef>(File.ReadAllText(path), RunnerProtocolJson.Options);
+            var contentRef = JsonSerializer.Deserialize<ContentReference>(
+                File.ReadAllText(path),
+                ControllerProtocolJson.Options);
             if (contentRef is not null && File.Exists(blobPath))
             {
                 _content[contentId] = new StoredClaimCheckContent(contentRef, File.ReadAllBytes(blobPath));
@@ -1424,9 +1724,9 @@ public sealed class RunnerControlStore
         }
     }
 
-    private void LoadRunnerHeartbeats()
+    private void LoadControllerHeartbeats()
     {
-        var root = RunnerHeartbeatRoot();
+        var root = ControllerHeartbeatRoot();
         if (!Directory.Exists(root))
         {
             return;
@@ -1434,37 +1734,149 @@ public sealed class RunnerControlStore
 
         foreach (var path in Directory.EnumerateFiles(root, "*.json"))
         {
-            var heartbeat = JsonSerializer.Deserialize<RunnerHeartbeat>(File.ReadAllText(path), RunnerProtocolJson.Options);
+            var heartbeat = JsonSerializer.Deserialize<ControllerHeartbeat>(
+                File.ReadAllText(path),
+                ControllerProtocolJson.Options);
             if (heartbeat is not null)
             {
-                _runnerHeartbeats[heartbeat.RunnerId] = heartbeat;
+                _controllerHeartbeats[heartbeat.ControllerId] = heartbeat;
             }
         }
     }
 
-    private string CommandRoot() => Path.Combine(_runtimeRoot, "runner", "commands");
+    private string ControllerRoot() => Path.Combine(_runtimeRoot, "controller-v1");
+    private string CommandRoot() => Path.Combine(ControllerRoot(), "commands");
     private string CommandPath(string commandId) => Path.Combine(CommandRoot(), $"{commandId}.json");
-    private string RunnerEventsPath() => Path.Combine(_runtimeRoot, "runner", "events.jsonl");
-    private string RunnerHeartbeatRoot() => Path.Combine(_runtimeRoot, "runner", "runners");
-    private string RunnerHeartbeatPath(string runnerId) => Path.Combine(RunnerHeartbeatRoot(), $"{runnerId}.json");
-    private string ContentRoot() => Path.Combine(_runtimeRoot, "content");
+    private string IdempotencyRoot() => Path.Combine(ControllerRoot(), "idempotency");
+    private string IdempotencyPath(string scope) =>
+        Path.Combine(
+            IdempotencyRoot(),
+            $"{ControllerCommandIdempotency.PathToken(scope)}.json");
+    private string AcknowledgementRoot() =>
+        Path.Combine(ControllerRoot(), "acknowledgements");
+    private string AcknowledgementPath(string commandId) =>
+        Path.Combine(AcknowledgementRoot(), $"{commandId}.json");
+    private string CompletionRoot() => Path.Combine(ControllerRoot(), "completions");
+    private string CompletionPath(string commandId) => Path.Combine(CompletionRoot(), $"{commandId}.json");
+    private string ControllerEventsPath() => Path.Combine(ControllerRoot(), "events.jsonl");
+    private string ControllerHeartbeatRoot() => Path.Combine(ControllerRoot(), "controllers");
+    private string ControllerHeartbeatPath(string controllerId) =>
+        Path.Combine(ControllerHeartbeatRoot(), $"{controllerId}.json");
+    private string ContentRoot() => Path.Combine(ControllerRoot(), "content");
     private string ContentBlobPath(string contentId) => Path.Combine(ContentRoot(), $"{contentId}.bin");
     private string ContentMetadataPath(string contentId) => Path.Combine(ContentRoot(), $"{contentId}.json");
 
     private static async Task WriteJsonAsync<T>(string path, T value, CancellationToken cancellationToken)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        await File.WriteAllTextAsync(path, JsonSerializer.Serialize(value, RunnerProtocolJson.Options), cancellationToken);
+        var temporaryPath = $"{path}.{Guid.NewGuid():N}.tmp";
+        await File.WriteAllTextAsync(
+            temporaryPath,
+            JsonSerializer.Serialize(value, ControllerProtocolJson.Options),
+            cancellationToken);
+        File.Move(temporaryPath, path, overwrite: true);
     }
 
     private static async Task<T> ReadJsonAsync<T>(string path, CancellationToken cancellationToken)
     {
         var json = await File.ReadAllTextAsync(path, cancellationToken);
-        return JsonSerializer.Deserialize<T>(json, RunnerProtocolJson.Options)
+        return JsonSerializer.Deserialize<T>(json, ControllerProtocolJson.Options)
             ?? throw new InvalidDataException($"{path} did not contain a valid {typeof(T).Name}.");
     }
 
-    private static JsonSerializerOptions JsonLineOptions { get; } = new(RunnerProtocolJson.Options)
+    private static DateTimeOffset Min(DateTimeOffset left, DateTimeOffset right) =>
+        left <= right ? left : right;
+
+    private static bool AcknowledgementsEquivalent(
+        ControllerCommandAcknowledgement left,
+        ControllerCommandAcknowledgement right)
+    {
+        return ControllerCommandIdempotency.SemanticHash(new
+        {
+            left.MessageType,
+            left.ProtocolVersion,
+            left.SchemaVersion,
+            left.CommandId,
+            left.ControllerId,
+            left.Status,
+            Error = NormalizeError(left.Error),
+            left.Extensions
+        }) == ControllerCommandIdempotency.SemanticHash(new
+        {
+            right.MessageType,
+            right.ProtocolVersion,
+            right.SchemaVersion,
+            right.CommandId,
+            right.ControllerId,
+            right.Status,
+            Error = NormalizeError(right.Error),
+            right.Extensions
+        });
+    }
+
+    private static bool CompletionsEquivalent(
+        ControllerCommandCompletion left,
+        ControllerCommandCompletion right)
+    {
+        return ControllerCommandIdempotency.SemanticHash(new
+        {
+            left.MessageType,
+            left.ProtocolVersion,
+            left.SchemaVersion,
+            left.CommandId,
+            left.ControllerId,
+            left.DeliveryStatus,
+            left.FencingToken,
+            Result = NormalizeContentReference(left.ResultRef),
+            Error = NormalizeError(left.Error),
+            left.Extensions
+        }) == ControllerCommandIdempotency.SemanticHash(new
+        {
+            right.MessageType,
+            right.ProtocolVersion,
+            right.SchemaVersion,
+            right.CommandId,
+            right.ControllerId,
+            right.DeliveryStatus,
+            right.FencingToken,
+            Result = NormalizeContentReference(right.ResultRef),
+            Error = NormalizeError(right.Error),
+            right.Extensions
+        });
+    }
+
+    private static object? NormalizeContentReference(ContentReference? contentRef)
+    {
+        return contentRef is null
+            ? null
+            : new
+            {
+                contentRef.Sha256,
+                contentRef.ContentType,
+                contentRef.Length,
+                contentRef.SchemaRef,
+                contentRef.Encryption
+            };
+    }
+
+    private static object? NormalizeError(ProtocolError? error)
+    {
+        return error is null
+            ? null
+            : new
+            {
+                error.Code,
+                error.Classification,
+                error.Summary,
+                error.Retryable,
+                error.TargetUsable,
+                error.ReconciliationRequired,
+                Diagnostic = NormalizeContentReference(error.DiagnosticRef),
+                error.ProviderRequestId
+            };
+    }
+
+    private static JsonSerializerOptions JsonLineOptions { get; } = new(ControllerProtocolJson.Options)
     {
         WriteIndented = false
     };
@@ -1514,24 +1926,39 @@ public sealed class CentralLogStore
     }
 }
 
-public enum RunnerCommandMutationStatus
+public enum ControllerCommandMutationStatus
 {
     Ok,
     NotFound,
     Conflict
 }
 
-public sealed record RunnerCommandMutationResult(
-    RunnerCommandMutationStatus Status,
-    RunnerCommandEnvelope? Command,
+public sealed record ControllerCommandMutationResult(
+    ControllerCommandMutationStatus Status,
+    ControllerCommand? Command,
+    ControllerCommandAcknowledgement? Acknowledgement,
+    ControllerCommandCompletion? Completion,
     string? Message)
 {
-    public static RunnerCommandMutationResult Ok(RunnerCommandEnvelope command) => new(RunnerCommandMutationStatus.Ok, command, null);
-    public static RunnerCommandMutationResult NotFound() => new(RunnerCommandMutationStatus.NotFound, null, null);
-    public static RunnerCommandMutationResult Conflict(string message) => new(RunnerCommandMutationStatus.Conflict, null, message);
+    public static ControllerCommandMutationResult Ok(
+        ControllerCommand command,
+        ControllerCommandAcknowledgement? acknowledgement = null,
+        ControllerCommandCompletion? completion = null) =>
+        new(
+            ControllerCommandMutationStatus.Ok,
+            command,
+            acknowledgement,
+            completion,
+            null);
+
+    public static ControllerCommandMutationResult NotFound() =>
+        new(ControllerCommandMutationStatus.NotFound, null, null, null, null);
+
+    public static ControllerCommandMutationResult Conflict(string message) =>
+        new(ControllerCommandMutationStatus.Conflict, null, null, null, message);
 }
 
-public readonly record struct StoredClaimCheckContent(ClaimCheckContentRef ContentRef, byte[] Bytes)
+public readonly record struct StoredClaimCheckContent(ContentReference ContentRef, byte[] Bytes)
 {
     public string ContentType => ContentRef.ContentType;
 }
@@ -1573,12 +2000,11 @@ public static class Ids
     public static string New(string prefix) => $"{prefix}_{Guid.NewGuid():N}";
 }
 
-public static class RunnerCommandFactory
+public static class ControllerCommandFactory
 {
-    public static RunnerCommandEnvelope Create(
-        string agentSessionId,
+    public static ControllerCommand Create(
         string type,
-        ClaimCheckContentRef? payloadRef,
+        ContentReference? payloadRef,
         string correlationId,
         string idempotencyKey,
         string? runnerId = null,
@@ -1587,20 +2013,38 @@ public static class RunnerCommandFactory
         string? commandId = null)
     {
         var now = DateTimeOffset.UtcNow;
-        return new RunnerCommandEnvelope(
-            Id: commandId ?? Ids.New("cmd"),
-            RunnerId: runnerId,
-            AgentSessionId: agentSessionId,
-            Type: type,
-            Status: RunnerCommandStatuses.Pending,
-            PayloadRef: payloadRef,
-            CorrelationId: correlationId,
+        var resolvedCommandId = commandId ?? Ids.New("cmd");
+        return new ControllerCommand(
+            MessageType: ControllerMessageTypes.Command,
+            ProtocolVersion: ControllerProtocolVersions.Protocol,
+            SchemaVersion: ControllerProtocolVersions.Schema,
+            CommandId: resolvedCommandId,
+            CommandType: type,
             IdempotencyKey: idempotencyKey,
-            CreatedAt: now,
+            IssuedAt: now,
+            Target: new ResourceTarget(
+                ControllerId: runnerId,
+                RuntimeId: agentId,
+                AgentSessionId: sessionId,
+                InvocationId: type == ControllerCommandTypes.StartInvocation
+                    ? correlationId
+                    : null),
+            Correlation: new ProtocolCorrelation(
+                CommandId: resolvedCommandId,
+                CorrelationId: correlationId,
+                InvocationId: type == ControllerCommandTypes.StartInvocation
+                    ? correlationId
+                    : null),
+            AuthorizationContext: new AuthorizationContext(
+                SubjectRef: "system://tradecraft-orchestrator",
+                GrantRef: $"authorization-grant://poc/{correlationId}",
+                IssuedAt: now,
+                ExpiresAt: now.AddHours(1)),
+            Execution: new CommandExecution(
+                Deadline: now.AddHours(1),
+                HeartbeatInterval: "PT30S"),
             AvailableAt: now,
-            Lease: null,
-            AgentId: agentId,
-            SessionId: sessionId);
+            PayloadRef: payloadRef);
     }
 }
 
@@ -1617,6 +2061,98 @@ public sealed record ClientLogRequest(
     DateTimeOffset? Timestamp,
     IReadOnlyDictionary<string, string?>? Context);
 
+public sealed record ControllerInventoryObservation(
+    string AgentSessionId,
+    string Status,
+    string RuntimePath,
+    string WorkspacePath,
+    string? OpenCodeEndpoint,
+    int? OpenCodePid,
+    DateTimeOffset ObservedAt,
+    string? AgentId,
+    IReadOnlyList<ControllerSessionObservation> Sessions)
+{
+    public static IReadOnlyList<ControllerInventoryObservation> FromHeartbeat(
+        ControllerHeartbeat heartbeat)
+    {
+        var sessions = heartbeat.Inventory.Sessions ?? [];
+        return heartbeat.Inventory.Runtimes
+            .Select(runtime =>
+            {
+                var extension = PocExtension(runtime.Extensions);
+                return new ControllerInventoryObservation(
+                    AgentSessionId: ReadString(extension, "agent_session_id")
+                        ?? runtime.RuntimeId,
+                    Status: runtime.Status,
+                    RuntimePath: ReadString(extension, "runtime_path") ?? string.Empty,
+                    WorkspacePath: ReadString(extension, "workspace_path") ?? string.Empty,
+                    OpenCodeEndpoint: ReadString(extension, "opencode_endpoint"),
+                    OpenCodePid: ReadInt32(extension, "opencode_pid"),
+                    ObservedAt: runtime.UpdatedAt,
+                    AgentId: runtime.RuntimeId,
+                    Sessions: sessions
+                        .Where(session => session.RuntimeId == runtime.RuntimeId)
+                        .Select(ControllerSessionObservation.FromResource)
+                        .ToArray());
+            })
+            .ToArray();
+    }
+
+    private static JsonElement? PocExtension(
+        IReadOnlyDictionary<string, JsonElement>? extensions)
+    {
+        return extensions is not null
+               && extensions.TryGetValue("tradecraft.poc", out var extension)
+            ? extension
+            : null;
+    }
+
+    internal static string? ReadString(JsonElement? extension, string propertyName)
+    {
+        return extension is { ValueKind: JsonValueKind.Object } value
+               && value.TryGetProperty(propertyName, out var property)
+               && property.ValueKind == JsonValueKind.String
+            ? property.GetString()
+            : null;
+    }
+
+    private static int? ReadInt32(JsonElement? extension, string propertyName)
+    {
+        return extension is { ValueKind: JsonValueKind.Object } value
+               && value.TryGetProperty(propertyName, out var property)
+               && property.ValueKind == JsonValueKind.Number
+            ? property.GetInt32()
+            : null;
+    }
+}
+
+public sealed record ControllerSessionObservation(
+    string SessionId,
+    string Status,
+    string RuntimePath,
+    string? OpenCodeSessionId,
+    DateTimeOffset ObservedAt)
+{
+    public static ControllerSessionObservation FromResource(
+        AgentSessionResource session)
+    {
+        JsonElement? extension = session.Extensions is not null
+                                 && session.Extensions.TryGetValue(
+                                     "tradecraft.poc",
+                                     out var value)
+            ? value
+            : null;
+        return new ControllerSessionObservation(
+            SessionId: session.AgentSessionId,
+            Status: session.Status,
+            RuntimePath: ControllerInventoryObservation.ReadString(
+                extension,
+                "runtime_path") ?? string.Empty,
+            OpenCodeSessionId: session.ProviderSessionRef,
+            ObservedAt: session.UpdatedAt);
+    }
+}
+
 public sealed record AgentControllerRecord(
     string RunnerId,
     string Status,
@@ -1625,18 +2161,19 @@ public sealed record AgentControllerRecord(
 {
     private static readonly TimeSpan ActiveHeartbeatWindow = TimeSpan.FromSeconds(30);
 
-    public static bool IsActive(RunnerHeartbeat heartbeat)
+    public static bool IsActive(ControllerHeartbeat heartbeat)
     {
         return heartbeat.ObservedAt >= DateTimeOffset.UtcNow - ActiveHeartbeatWindow;
     }
 
-    public static AgentControllerRecord FromHeartbeat(RunnerHeartbeat heartbeat)
+    public static AgentControllerRecord FromHeartbeat(ControllerHeartbeat heartbeat)
     {
+        var agents = ControllerInventoryObservation.FromHeartbeat(heartbeat);
         return new AgentControllerRecord(
-            RunnerId: heartbeat.RunnerId,
+            RunnerId: heartbeat.ControllerId,
             Status: heartbeat.Status,
             ObservedAt: heartbeat.ObservedAt,
-            Agents: heartbeat.Agents.Select(AgentControllerAgentRecord.FromInventory).ToArray());
+            Agents: agents.Select(AgentControllerAgentRecord.FromInventory).ToArray());
     }
 }
 
@@ -1649,9 +2186,9 @@ public sealed record AgentControllerAgentRecord(
     int? OpenCodePid,
     DateTimeOffset ObservedAt,
     string? AgentId = null,
-    IReadOnlyList<RunnerAgentSessionInventoryItem>? Sessions = null)
+    IReadOnlyList<ControllerSessionObservation>? Sessions = null)
 {
-    public static AgentControllerAgentRecord FromInventory(RunnerAgentInventoryItem agent)
+    public static AgentControllerAgentRecord FromInventory(ControllerInventoryObservation agent)
     {
         return new AgentControllerAgentRecord(
             AgentSessionId: agent.AgentSessionId,
@@ -1697,7 +2234,9 @@ public sealed record AgentRecord(
             OpenCodePid: null);
     }
 
-    public static AgentRecord FromInventory(string controllerId, RunnerAgentInventoryItem inventory)
+    public static AgentRecord FromInventory(
+        string controllerId,
+        ControllerInventoryObservation inventory)
     {
         var status = inventory.Status is "planned" or "starting" ? "preparing" : inventory.Status;
         return new AgentRecord(
@@ -1771,7 +2310,9 @@ public sealed record AgentSessionRecord(
             AgentId: agent.Id);
     }
 
-    public static AgentSessionRecord FromInventory(string controllerId, RunnerAgentInventoryItem agent)
+    public static AgentSessionRecord FromInventory(
+        string controllerId,
+        ControllerInventoryObservation agent)
     {
         var status = agent.Status switch
         {

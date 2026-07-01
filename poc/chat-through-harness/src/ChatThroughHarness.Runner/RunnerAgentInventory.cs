@@ -2,9 +2,26 @@ using System.Diagnostics;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
-using ChatThroughHarness.Protocol;
 
 namespace ChatThroughHarness.Runner;
+
+public sealed record RunnerAgentInventoryItem(
+    string AgentSessionId,
+    string Status,
+    string RuntimePath,
+    string WorkspacePath,
+    string? OpenCodeEndpoint,
+    int? OpenCodePid,
+    DateTimeOffset ObservedAt,
+    string? AgentId = null,
+    IReadOnlyList<RunnerAgentSessionInventoryItem>? Sessions = null);
+
+public sealed record RunnerAgentSessionInventoryItem(
+    string SessionId,
+    string Status,
+    string RuntimePath,
+    string? OpenCodeSessionId,
+    DateTimeOffset ObservedAt);
 
 public static class RunnerAgentInventory
 {

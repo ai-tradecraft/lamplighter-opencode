@@ -1,6 +1,5 @@
 namespace ChatThroughHarness.Api.Tests;
 
-using ChatThroughHarness.Protocol;
 using Xunit;
 
 public sealed class AgentOwnershipTests
@@ -11,7 +10,7 @@ public sealed class AgentOwnershipTests
         var store = new AgentStore();
         var agent = AgentRecord.Create("runner_owner", new CreateAgentRequest());
         await store.UpsertAgentAsync(agent, CancellationToken.None);
-        var inventory = new RunnerAgentInventoryItem(
+        var inventory = new ControllerInventoryObservation(
             AgentSessionId: agent.Id,
             Status: "ready",
             RuntimePath: "/runtime",

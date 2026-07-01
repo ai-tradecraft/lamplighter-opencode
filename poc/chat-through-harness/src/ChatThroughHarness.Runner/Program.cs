@@ -1,4 +1,3 @@
-using ChatThroughHarness.Protocol;
 using ChatThroughHarness.Runner;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
