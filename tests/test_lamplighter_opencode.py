@@ -298,7 +298,9 @@ def test_opencode_environment_inherits_global_config_by_default(tmp_path, monkey
     (root / "workspace").mkdir(parents=True)
     monkeypatch.setenv("HOME", "/Users/local-dev")
     monkeypatch.delenv("LAMPLIGHTER_OPENCODE_CONFIG_MODE", raising=False)
-    monkeypatch.delenv("AZURE_OPENAI_DEPLOYMENT", raising=False)
+    monkeypatch.setenv("AZURE_OPENAI_DEPLOYMENT", "deployment")
+    monkeypatch.setenv("LAMPLIGHTER_OPENCODE_MODEL", "azure/deployment")
+    monkeypatch.setenv("OPENCODE_MODEL", "anthropic/model")
 
     command, observed = opencode_run_command(root, "hello")
     env = opencode_environment(root)

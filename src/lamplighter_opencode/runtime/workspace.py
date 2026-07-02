@@ -618,6 +618,7 @@ def stop_agent(layout: AgentLayout) -> dict[str, Any]:
     """Stop an agent's OpenCode server while retaining its workspace."""
     with _agent_lifecycle_lock(layout.runtime_dir):
         metadata = _read_json(layout.server_metadata_path)
+        stopped_at = datetime.now(UTC).isoformat()
         pid = metadata.get("pid")
         if isinstance(pid, int):
             try:
@@ -625,12 +626,27 @@ def stop_agent(layout: AgentLayout) -> dict[str, Any]:
             except ProcessLookupError:
                 pass
         metadata["status"] = "stopped"
-        metadata["ended_at"] = datetime.now(UTC).isoformat()
+        metadata["ended_at"] = stopped_at
         _write_json(layout.server_metadata_path, metadata)
 
         agent = _read_json(layout.metadata_path)
         agent["status"] = "stopped"
+        agent["ended_at"] = stopped_at
         _write_json(layout.metadata_path, agent)
+
+        closed_sessions: list[str] = []
+        if layout.sessions_dir.exists():
+            for session_path in sorted(layout.sessions_dir.glob("*/session.json")):
+                session = _read_json(session_path)
+                if session.get("status") in {"cancelled", "failed", "stopped", "closed"}:
+                    continue
+                session["status"] = "cancelled"
+                session["ended_at"] = session.get("ended_at") or stopped_at
+                session["closed_reason"] = "Parent agent stopped."
+                _write_json(session_path, session)
+                closed_sessions.append(str(session.get("agent_session_id") or session.get("session_id") or session_path.parent.name))
+        metadata["closed_sessions"] = closed_sessions
+        _write_json(layout.server_metadata_path, metadata)
         return metadata
 
 
@@ -682,24 +698,17 @@ def opencode_run_command(root: Path, instruction: str, mode: str | None = None) 
     else:
         command.extend(["--dir", str(root / "workspace")])
         observed_parts.append("--dir <workspace>")
-        model = inherited_opencode_model()
-        if model:
-            command.extend(["--model", model])
-            observed_parts.append(f"--model {model}")
 
     command.append(instruction)
     return command, " ".join(observed_parts)
 
 
 def inherited_opencode_model() -> str | None:
-    """Return an optional model override while allowing global OpenCode defaults."""
-    explicit = os.environ.get("LAMPLIGHTER_OPENCODE_MODEL") or os.environ.get("OPENCODE_MODEL")
-    if explicit:
-        return explicit
+    """Return no override for global OpenCode configuration.
 
-    deployment = os.environ.get("AZURE_OPENAI_DEPLOYMENT")
-    if deployment:
-        return f"azure/{deployment}"
+    The inherit-global path intentionally treats OpenCode as already configured.
+    Provider, model, and auth selection belong to OpenCode, not the harness.
+    """
     return None
 
 

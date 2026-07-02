@@ -625,6 +625,14 @@ static async Task ApplyControllerEventAsync(
                             : agent.EndedAt
                     },
                     cancellationToken);
+                if (status == "stopped")
+                {
+                    await sessionStore.CloseSessionsForAgentAsync(
+                        runtimeId,
+                        controllerEvent.OccurredAt,
+                        "Parent agent stopped.",
+                        cancellationToken);
+                }
             }
             break;
         }
@@ -1109,6 +1117,29 @@ public sealed class AgentSessionStore
         await UpsertSessionAsync(observed, cancellationToken);
     }
 
+    public async Task CloseSessionsForAgentAsync(
+        string agentId,
+        DateTimeOffset endedAt,
+        string reason,
+        CancellationToken cancellationToken)
+    {
+        var sessions = _sessions.Values
+            .Where(session => session.AgentId == agentId && !IsTerminalSessionStatus(session.Status))
+            .ToArray();
+        foreach (var session in sessions)
+        {
+            await UpsertSessionAsync(
+                session with
+                {
+                    Status = "cancelled",
+                    EndedAt = session.EndedAt ?? endedAt,
+                    FailedAt = null,
+                    FailureSummary = reason
+                },
+                cancellationToken);
+        }
+    }
+
     public async Task UpsertInventorySessionAsync(
         string runnerId,
         ControllerInventoryObservation agent,
@@ -1255,7 +1286,7 @@ public sealed class AgentSessionStore
 
     private static bool IsTerminalSessionStatus(string status)
     {
-        return status is "cancelled" or "cancelling" or "failed";
+        return status is "cancelled" or "cancelling" or "failed" or "stopped" or "closed";
     }
 
     private static async Task WriteJsonAsync<T>(string path, T value, CancellationToken cancellationToken)

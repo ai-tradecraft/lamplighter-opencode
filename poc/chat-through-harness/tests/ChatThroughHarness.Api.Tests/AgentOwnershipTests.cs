@@ -31,4 +31,42 @@ public sealed class AgentOwnershipTests
         Assert.NotNull(unchanged);
         Assert.Equal("runner_owner", unchanged.ControllerId);
     }
+
+    [Fact]
+    public async Task ClosingAgentSessionsCancelsOnlyNonterminalChildren()
+    {
+        var store = new AgentSessionStore();
+        var agent = AgentRecord.Create("runner_owner", new CreateAgentRequest());
+        var ready = AgentSessionRecord.CreateForAgent(agent, new CreateAgentSessionRequest())
+            with { Status = "ready" };
+        var preparing = AgentSessionRecord.CreateForAgent(agent, new CreateAgentSessionRequest())
+            with { Status = "preparing" };
+        var failed = AgentSessionRecord.CreateForAgent(agent, new CreateAgentSessionRequest())
+            with { Status = "failed", FailedAt = DateTimeOffset.UtcNow };
+        var otherAgent = AgentRecord.Create("runner_owner", new CreateAgentRequest());
+        var unrelated = AgentSessionRecord.CreateForAgent(otherAgent, new CreateAgentSessionRequest())
+            with { Status = "ready" };
+        await store.UpsertSessionAsync(ready, CancellationToken.None);
+        await store.UpsertSessionAsync(preparing, CancellationToken.None);
+        await store.UpsertSessionAsync(failed, CancellationToken.None);
+        await store.UpsertSessionAsync(unrelated, CancellationToken.None);
+        var stoppedAt = DateTimeOffset.UtcNow;
+
+        await store.CloseSessionsForAgentAsync(
+            agent.Id,
+            stoppedAt,
+            "Parent agent stopped.",
+            CancellationToken.None);
+
+        var closedReady = await store.GetSessionAsync(ready.Id, CancellationToken.None);
+        var closedPreparing = await store.GetSessionAsync(preparing.Id, CancellationToken.None);
+        var unchangedFailed = await store.GetSessionAsync(failed.Id, CancellationToken.None);
+        var unchangedUnrelated = await store.GetSessionAsync(unrelated.Id, CancellationToken.None);
+        Assert.Equal("cancelled", closedReady?.Status);
+        Assert.Equal("cancelled", closedPreparing?.Status);
+        Assert.Equal(stoppedAt, closedReady?.EndedAt);
+        Assert.Equal("Parent agent stopped.", closedReady?.FailureSummary);
+        Assert.Equal("failed", unchangedFailed?.Status);
+        Assert.Equal("ready", unchangedUnrelated?.Status);
+    }
 }

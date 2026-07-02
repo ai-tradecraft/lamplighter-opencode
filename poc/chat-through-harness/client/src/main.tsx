@@ -451,11 +451,21 @@ function App() {
     if (!agent) {
       return;
     }
-    const response = await apiFetch(`/api/agents/${agent.id}/stop`, { method: "POST" });
-    if (response.ok) {
-      setAgent((await response.json()) as Agent);
-    } else {
-      setError(await responseError(response, "Stopping the agent failed"));
+    setBusy(true);
+    setError(null);
+    try {
+      const response = await apiFetch(`/api/agents/${agent.id}/stop`, { method: "POST" });
+      if (response.ok) {
+        const stopped = (await response.json()) as Agent;
+        setAgent(stopped);
+        await loadAgent(stopped.id);
+      } else {
+        setError(await responseError(response, "Stopping the agent failed"));
+      }
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -659,7 +669,7 @@ function App() {
             <dt>Workspace</dt><dd title={agent.workspacePath}>{agent.workspacePath || "Pending allocation"}</dd>
             <dt>Runtime</dt><dd title={agent.runtimePath}>{agent.runtimePath || "Pending allocation"}</dd>
           </dl>
-          <button className="secondary-button" onClick={stopAgent} disabled={agent.status === "stopped"}>
+          <button className="secondary-button" onClick={stopAgent} disabled={busy || agent.status === "stopped"}>
             <CircleStop size={16} /> Stop Agent
           </button>
         </section>

@@ -194,28 +194,15 @@ The real backend test uses OpenCode through the Lamplighter harness:
 make test-real-backend
 ```
 
-For local development only, this target sources a gitignored `.env` file from
-the `lamplighter-opencode` repo root and sets
-`LAMPLIGHTER_OPENCODE_USE_REAL_BACKEND=1` and
-`LAMPLIGHTER_OPENCODE_CONFIG_MODE=project-only`.
+For normal local development, configure OpenCode directly before enabling the
+real backend. The harness assumes OpenCode already knows the intended provider,
+model, auth state, tools, and policy. The POC should not pass provider API keys,
+model names, or inline OpenCode config through the orchestrator/controller
+boundary.
 
-Expected provider variables:
-
-```text
-AZURE_OPENAI_API_KEY
-AZURE_OPENAI_ENDPOINT
-AZURE_OPENAI_DEPLOYMENT
-```
-
-The `.env` file is only a developer convenience. In production, these values
-should come from the runner's injected process environment, populated by the
-deployment platform's secret system, such as Kubernetes Secrets, Azure Key
-Vault references, CI secret variables, Aspire configuration, Docker Compose, or
-another approved provider.
-
-Lamplighter should persist only required environment variable names or secret
-references, never secret values. The runner resolves the values at launch time
-and injects them into the OpenCode process.
+Some opt-in deterministic backend checks still use adapter-private fixture
+settings to isolate OpenCode from the developer's global config. Treat those
+settings as local test scaffolding, not as the Lamplighter controller contract.
 
 ## OpenCode Configuration Modes
 
@@ -233,7 +220,7 @@ The POC supports explicit OpenCode configuration modes through
 - `managed` is reserved for production-style execution where the runner or
   platform injects approved configuration and secrets.
 
-Use `project-only` or `managed` when a test or work session must prove it used
-the intended backend, credentials, model, and policy. Use `inherit-global` when
-the goal is a natural local workflow that benefits from the developer's existing
-OpenCode setup.
+Use `project-only` only when an adapter test fixture must prove it used an
+isolated backend, credentials, model, and policy. Use `inherit-global` for the
+orchestrated POC and natural local workflows that benefit from the developer's
+existing OpenCode setup.

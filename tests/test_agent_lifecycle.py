@@ -81,6 +81,88 @@ def test_prepare_start_and_stop_agent(tmp_path: Path, monkeypatch) -> None:
     assert metadata["status"] == "stopped"
 
 
+def test_stop_agent_cancels_nonterminal_child_sessions(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("LAMPLIGHTER_OPENCODE_USE_REAL_BACKEND", raising=False)
+    controller_workspace = tmp_path / "controller"
+    spec_path = tmp_path / "agent-spec.json"
+    spec_path.write_text(json.dumps(_agent_spec()), encoding="utf-8")
+    assert (
+        runner.invoke(
+            app,
+            [
+                "prepare-agent",
+                "--spec",
+                str(spec_path),
+                "--controller-workspace",
+                str(controller_workspace),
+                "--skip-backend-env-check",
+                "--json",
+            ],
+        ).exit_code
+        == 0
+    )
+    assert (
+        runner.invoke(
+            app,
+            [
+                "start-agent",
+                "--agent",
+                "agent_one",
+                "--controller-workspace",
+                str(controller_workspace),
+                "--dry-run",
+                "--json",
+            ],
+        ).exit_code
+        == 0
+    )
+
+    for session_id in ("session_one", "session_two"):
+        session_spec_path = tmp_path / f"{session_id}.json"
+        session_spec_path.write_text(json.dumps(_session_spec(session_id)), encoding="utf-8")
+        created = runner.invoke(
+            app,
+            [
+                "create-session",
+                "--agent",
+                "agent_one",
+                "--spec",
+                str(session_spec_path),
+                "--controller-workspace",
+                str(controller_workspace),
+                "--json",
+            ],
+        )
+        assert created.exit_code == 0, created.stdout
+
+    first = agent_session_layout(controller_workspace, "agent_one", "session_one")
+    second = agent_session_layout(controller_workspace, "agent_one", "session_two")
+    second_metadata = json.loads(second.metadata_path.read_text(encoding="utf-8"))
+    second_metadata["status"] = "failed"
+    second.metadata_path.write_text(json.dumps(second_metadata), encoding="utf-8")
+
+    stopped = runner.invoke(
+        app,
+        [
+            "stop-agent",
+            "--agent",
+            "agent_one",
+            "--controller-workspace",
+            str(controller_workspace),
+            "--json",
+        ],
+    )
+
+    assert stopped.exit_code == 0, stopped.stdout
+    stop_payload = json.loads(stopped.stdout)
+    assert stop_payload["closed_sessions"] == ["session_one"]
+    first_metadata = json.loads(first.metadata_path.read_text(encoding="utf-8"))
+    second_metadata = json.loads(second.metadata_path.read_text(encoding="utf-8"))
+    assert first_metadata["status"] == "cancelled"
+    assert first_metadata["closed_reason"] == "Parent agent stopped."
+    assert second_metadata["status"] == "failed"
+
+
 def test_agent_owns_multiple_isolated_sessions(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("LAMPLIGHTER_OPENCODE_USE_REAL_BACKEND", raising=False)
     controller_workspace = tmp_path / "controller"
