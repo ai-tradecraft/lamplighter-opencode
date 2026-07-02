@@ -4,7 +4,7 @@ using System.Collections.Immutable;
 using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text.Json;
-using ChatThroughHarness.Protocol.V1;
+using Tradecraft.Contracts.AgentRuntime.V1;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Xunit;
 

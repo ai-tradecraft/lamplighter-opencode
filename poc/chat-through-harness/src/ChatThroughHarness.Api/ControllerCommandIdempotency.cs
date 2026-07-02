@@ -1,7 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using ChatThroughHarness.Protocol.V1;
+using Tradecraft.Contracts.AgentRuntime.V1;
 
 internal static class ControllerCommandIdempotency
 {

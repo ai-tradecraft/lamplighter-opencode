@@ -4,6 +4,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 POC="$ROOT/poc/chat-through-harness"
 CLIENT="$POC/client"
+SUBMODULES="$(cd "$ROOT/.." && pwd)"
+CONTROLLER="$SUBMODULES/lamplighter-controller"
+CONTRACTS="$SUBMODULES/tradecraft-contracts"
+export TRADECRAFT_CONTRACTS_ROOT="$CONTRACTS"
 
 cd "$ROOT"
 
@@ -16,6 +20,10 @@ uv run pytest
 echo "==> ASP.NET POC build and tests"
 dotnet build "$POC/ChatThroughHarness.sln"
 dotnet test "$POC/ChatThroughHarness.sln" --no-build
+
+echo "==> Lamplighter controller build and tests"
+dotnet build "$CONTROLLER/Lamplighter.Controller.slnx"
+dotnet test "$CONTROLLER/Lamplighter.Controller.slnx" --no-build
 
 echo "==> React client build"
 cd "$CLIENT"

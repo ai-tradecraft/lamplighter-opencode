@@ -9,7 +9,9 @@ Optional local env examples are available in:
 
 - `../../.env.example` for Lamplighter/OpenCode backend variables.
 - `src/ChatThroughHarness.Api/.env.example` for API variables.
-- `src/ChatThroughHarness.Runner/.env.example` for runner variables.
+- `../lamplighter-controller/src/Lamplighter.Controller/.env.example` for
+  controller variables when working from the `lamplighter-opencode` repo root
+  in the meta-repository submodule layout.
 - `client/.env.example` for Vite/React variables.
 
 When already inside a tmux session, start all three services and open the
@@ -34,7 +36,7 @@ It opens `http://127.0.0.1:5173` in the default browser as soon as Vite is
 ready. The runner and UI wait for the API readiness endpoint before starting,
 so their initial requests do not race the ASP.NET startup. The runner loads
 backend variables from the repo-root `.env`, then applies any overrides from
-`poc/chat-through-harness/src/ChatThroughHarness.Runner/.env`.
+the sibling `lamplighter-controller/src/Lamplighter.Controller/.env`.
 
 To use a different tmux window name or portal URL:
 
@@ -58,8 +60,10 @@ polls the API for work, prepares Lamplighter sessions, starts `opencode serve`,
 submits turns, and reports results/events back.
 
 ```sh
-cd poc/chat-through-harness
-dotnet run --project src/ChatThroughHarness.Runner
+cd ../lamplighter-controller
+Runner__HarnessRepoRoot=../lamplighter-opencode \
+TRADECRAFT_CONTRACTS_ROOT=../tradecraft-contracts \
+dotnet run --project src/Lamplighter.Controller
 ```
 
 In a third terminal, start the React UI:

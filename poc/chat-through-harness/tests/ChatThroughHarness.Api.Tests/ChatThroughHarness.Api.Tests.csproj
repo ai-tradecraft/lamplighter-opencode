@@ -13,7 +13,6 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../../src/ChatThroughHarness.Api/ChatThroughHarness.Api.csproj" />
-    <ProjectReference Include="..\..\src\ChatThroughHarness.Protocol\ChatThroughHarness.Protocol.csproj" />
-    <ProjectReference Include="..\..\src\ChatThroughHarness.Runner\ChatThroughHarness.Runner.csproj" />
+    <ProjectReference Include="..\..\..\..\..\tradecraft-contracts\src\Tradecraft.Contracts\Tradecraft.Contracts.csproj" />
   </ItemGroup>
 </Project>

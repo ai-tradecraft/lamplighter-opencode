@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
   <ItemGroup>
-    <ProjectReference Include="..\ChatThroughHarness.Protocol\ChatThroughHarness.Protocol.csproj" />
+    <ProjectReference Include="..\..\..\..\..\tradecraft-contracts\src\Tradecraft.Contracts\Tradecraft.Contracts.csproj" />
   </ItemGroup>
   <PropertyGroup>
     <TargetFramework>net8.0</TargetFramework>

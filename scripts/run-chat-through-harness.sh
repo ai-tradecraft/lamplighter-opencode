@@ -4,6 +4,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 POC="$ROOT/poc/chat-through-harness"
 CLIENT="$POC/client"
+SUBMODULES="$(cd "$ROOT/.." && pwd)"
+CONTROLLER="$SUBMODULES/lamplighter-controller"
+CONTRACTS="$SUBMODULES/tradecraft-contracts"
 SCRIPT="$ROOT/scripts/run-chat-through-harness.sh"
 API_URL="${CHAT_THROUGH_HARNESS_API_URL:-http://127.0.0.1:5087}"
 PORTAL_URL="${CHAT_THROUGH_HARNESS_URL:-http://127.0.0.1:5173}"
@@ -112,8 +115,11 @@ wait_for_api_contract() {
 owned_service_pids() {
   ps -axo pid=,command= | awk -v root="$POC" '
     index($0, root "/src/ChatThroughHarness.Api/bin/") ||
-    index($0, root "/src/ChatThroughHarness.Runner/bin/") ||
     index($0, root "/client/node_modules/.bin/vite") {
+      print $1
+    }
+  ' && ps -axo pid=,command= | awk -v controller="$CONTROLLER" '
+    index($0, controller "/src/Lamplighter.Controller/bin/") {
       print $1
     }
   '
@@ -186,14 +192,16 @@ run_api() {
 
 run_runner() {
   source_env "$ROOT/.env"
-  source_env "$POC/src/ChatThroughHarness.Runner/.env"
+  source_env "$CONTROLLER/src/Lamplighter.Controller/.env"
   export Runner__RunnerId="${Runner__RunnerId:-runner_local}"
   export Runner__OrchestratorBaseUri="${Runner__OrchestratorBaseUri:-http://127.0.0.1:5087}"
+  export Runner__HarnessRepoRoot="${Runner__HarnessRepoRoot:-$ROOT}"
   export LAMPLIGHTER_CONTROLLER_WORKSPACE="${LAMPLIGHTER_CONTROLLER_WORKSPACE:-$(controller_workspace)}"
+  export TRADECRAFT_CONTRACTS_ROOT="${TRADECRAFT_CONTRACTS_ROOT:-$CONTRACTS}"
   export LAMPLIGHTER_OPENCODE_CONFIG_MODE="${LAMPLIGHTER_OPENCODE_CONFIG_MODE:-inherit-global}"
   wait_for_api_contract "${Runner__OrchestratorBaseUri%/}"
-  cd "$POC"
-  run_logged runner dotnet run --project src/ChatThroughHarness.Runner
+  cd "$CONTROLLER"
+  run_logged runner dotnet run --project src/Lamplighter.Controller
 }
 
 run_ui() {
