@@ -41,7 +41,7 @@
     "backend": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "server", "config", "required_env_vars"],
+      "required": ["kind", "server"],
       "properties": {
         "kind": {
           "const": "opencode"
@@ -64,7 +64,7 @@
         },
         "config": {
           "type": "object",
-          "required": ["provider", "model"],
+          "description": "Optional adapter-private OpenCode fixture metadata. Provider, model, and auth normally belong to OpenCode configuration itself.",
           "properties": {
             "provider": {
               "type": "string",

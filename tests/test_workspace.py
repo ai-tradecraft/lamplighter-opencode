@@ -59,12 +59,6 @@ def _valid_session_spec() -> dict[str, object]:
                 "host": "127.0.0.1",
                 "port": 4096,
             },
-            "config": {
-                "provider": "azure",
-                "model": "gpt-test",
-                "wire_api": "responses",
-            },
-            "required_env_vars": ["AZURE_OPENAI_BASE_URL", "AZURE_OPENAI_API_KEY"],
         },
         "tool_profile": {},
         "mcp_profile": {},

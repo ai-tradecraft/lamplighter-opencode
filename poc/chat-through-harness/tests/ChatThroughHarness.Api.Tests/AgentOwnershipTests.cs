@@ -69,4 +69,16 @@ public sealed class AgentOwnershipTests
         Assert.Equal("failed", unchangedFailed?.Status);
         Assert.Equal("ready", unchangedUnrelated?.Status);
     }
+
+    [Fact]
+    public void AgentSpecFromAgentDoesNotEmitProviderOrModelConfiguration()
+    {
+        var agent = AgentRecord.Create("runner_owner", new CreateAgentRequest());
+
+        var spec = AgentSpec.FromAgent(agent);
+
+        Assert.Equal("opencode", spec.Backend.Kind);
+        Assert.Empty(spec.Backend.Config);
+        Assert.Empty(spec.Backend.RequiredEnvironmentVariables);
+    }
 }

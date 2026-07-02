@@ -33,11 +33,16 @@ class OpenCodeServerConfig:
 
 @dataclass(frozen=True)
 class OpenCodeBackendConfig:
-    """OpenCode backend configuration referenced by an agent session."""
+    """OpenCode runtime binding referenced by an agent or session.
+
+    Provider, model, and auth configuration normally belong to OpenCode itself.
+    ``config`` remains available for adapter-private fixtures, but the common
+    inherit-global path should not require or synthesize provider details.
+    """
 
     kind: Literal["opencode"]
     server: OpenCodeServerConfig
-    config: JsonObject
+    config: JsonObject = field(default_factory=dict)
     required_env_vars: list[str] = field(default_factory=list)
 
     @classmethod
@@ -45,7 +50,7 @@ class OpenCodeBackendConfig:
         return cls(
             kind=value["kind"],
             server=OpenCodeServerConfig.from_dict(value["server"]),
-            config=value["config"],
+            config=value.get("config", {}),
             required_env_vars=value.get("required_env_vars", []),
         )
 
@@ -178,11 +183,7 @@ class AgentSessionSpec:
                         "host": "127.0.0.1",
                         "port": 4096,
                     },
-                    "config": {
-                        "provider": "azure",
-                        "model": "azure/{env:AZURE_OPENAI_DEPLOYMENT}",
-                        "wire_api": "responses",
-                    },
+                    "config": {},
                     "required_env_vars": [],
                 },
             }

@@ -199,6 +199,39 @@ public sealed class CliRunnerCommandHandlerTests
             api.Uploads.Single().ContentType);
     }
 
+    [Fact]
+    public void ConfigureHarnessProcessEnvironment_RemovesProviderOwnedOpenCodeSettings()
+    {
+        var environment = new Dictionary<string, string?>
+        {
+            ["LAMPLIGHTER_OPENCODE_USE_REAL_BACKEND"] = "1",
+            ["LAMPLIGHTER_OPENCODE_CONFIG_MODE"] = "project-only",
+            ["LAMPLIGHTER_OPENCODE_MODEL"] = "azure/deployment",
+            ["OPENCODE_MODEL"] = "anthropic/model",
+            ["OPENCODE_CONFIG"] = "/tmp/opencode.json",
+            ["OPENCODE_CONFIG_DIR"] = "/tmp/opencode",
+            ["OPENCODE_CONFIG_CONTENT"] = "{}",
+            ["AZURE_OPENAI_API_KEY"] = "secret",
+            ["AZURE_OPENAI_ENDPOINT"] = "https://example.openai.azure.com/",
+            ["AZURE_OPENAI_DEPLOYMENT"] = "deployment",
+            ["AZURE_OPENAI_RESOURCE_NAME"] = "resource",
+            ["ANTHROPIC_API_KEY"] = "secret",
+            ["OPENAI_API_KEY"] = "secret",
+            ["OPENCODE_DISABLE_AUTOUPDATE"] = "1"
+        };
+
+        HarnessProcessRunner.ConfigureHarnessProcessEnvironment(environment);
+
+        Assert.Equal("1", environment["LAMPLIGHTER_OPENCODE_USE_REAL_BACKEND"]);
+        Assert.Equal("1", environment["OPENCODE_DISABLE_AUTOUPDATE"]);
+        Assert.DoesNotContain(environment.Keys, key => key.Contains("MODEL", StringComparison.Ordinal));
+        Assert.DoesNotContain(environment.Keys, key => key.Contains("API_KEY", StringComparison.Ordinal));
+        Assert.False(environment.ContainsKey("LAMPLIGHTER_OPENCODE_CONFIG_MODE"));
+        Assert.False(environment.ContainsKey("OPENCODE_CONFIG"));
+        Assert.False(environment.ContainsKey("OPENCODE_CONFIG_DIR"));
+        Assert.False(environment.ContainsKey("OPENCODE_CONFIG_CONTENT"));
+    }
+
     private static CliRunnerCommandHandler CreateHandler(
         IRunnerApiClient api,
         IHarnessProcessRunner process,

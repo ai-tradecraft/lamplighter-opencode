@@ -555,6 +555,22 @@ public sealed class HarnessProcessRunner(
     IOptions<RunnerOptions> options,
     ILogger<HarnessProcessRunner> logger) : IHarnessProcessRunner
 {
+    private static readonly string[] ProviderOwnedEnvironmentVariables =
+    [
+        "LAMPLIGHTER_OPENCODE_CONFIG_MODE",
+        "LAMPLIGHTER_OPENCODE_MODEL",
+        "OPENCODE_MODEL",
+        "OPENCODE_CONFIG",
+        "OPENCODE_CONFIG_DIR",
+        "OPENCODE_CONFIG_CONTENT",
+        "AZURE_OPENAI_API_KEY",
+        "AZURE_OPENAI_ENDPOINT",
+        "AZURE_OPENAI_DEPLOYMENT",
+        "AZURE_OPENAI_RESOURCE_NAME",
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY"
+    ];
+
     private readonly RunnerOptions _options = options.Value;
 
     public async Task<ProcessOutput> RunAsync(
@@ -571,6 +587,7 @@ public sealed class HarnessProcessRunner(
             RedirectStandardOutput = true,
             RedirectStandardError = true
         };
+        ConfigureHarnessProcessEnvironment(startInfo.Environment);
 
         foreach (var argument in arguments)
         {
@@ -625,6 +642,14 @@ public sealed class HarnessProcessRunner(
         }
 
         return Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../.."));
+    }
+
+    public static void ConfigureHarnessProcessEnvironment(IDictionary<string, string?> environment)
+    {
+        foreach (var name in ProviderOwnedEnvironmentVariables)
+        {
+            environment.Remove(name);
+        }
     }
 
     private static string Quote(string value)

@@ -2748,12 +2748,7 @@ public sealed record AgentSpec(
             Backend: new AgentBackendSpec(
                 "opencode",
                 new BackendServerSpec("127.0.0.1", 4096),
-                new Dictionary<string, object?>
-                {
-                    ["provider"] = "azure",
-                    ["model"] = "azure/{env:AZURE_OPENAI_DEPLOYMENT}",
-                    ["wire_api"] = "responses"
-                },
+                new Dictionary<string, object?>(),
                 []),
             AgentDefinitionId: "opencode.default",
             RepoRef: "lamplighter-opencode",

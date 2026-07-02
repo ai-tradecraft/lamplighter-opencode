@@ -389,11 +389,7 @@ def _normalize_session_spec(value: dict[str, object]) -> dict[str, object]:
                 "host": "127.0.0.1",
                 "port": 4096,
             },
-            "config": {
-                "provider": "azure",
-                "model": "azure/{env:AZURE_OPENAI_DEPLOYMENT}",
-                "wire_api": "responses",
-            },
+            "config": {},
             "required_env_vars": [],
         },
         "goal_run_id": value.get("goal_run_id"),

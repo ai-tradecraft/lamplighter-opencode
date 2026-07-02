@@ -14,7 +14,30 @@ def test_agent_session_spec_validates() -> None:
 
     assert spec.agent_session_id == "session-1"
     assert spec.backend.kind == "opencode"
-    assert spec.backend.config["provider"] == "azure"
+    assert spec.backend.config == {}
+
+
+def test_agent_session_spec_accepts_adapter_private_backend_config() -> None:
+    value = _valid_session_spec()
+    value["backend"] = {
+        "kind": "opencode",
+        "server": {
+            "host": "127.0.0.1",
+            "port": 4096,
+        },
+        "config": {
+            "provider": "fixture-provider",
+            "model": "fixture/model",
+            "wire_api": "responses",
+        },
+        "required_env_vars": ["FIXTURE_API_KEY"],
+    }
+
+    validate_contract("agent_session_spec.schema.json", value)
+    spec = AgentSessionSpec.from_dict(value)
+
+    assert spec.backend.config["provider"] == "fixture-provider"
+    assert spec.backend.required_env_vars == ["FIXTURE_API_KEY"]
 
 
 def test_agent_session_spec_rejects_extra_properties() -> None:
@@ -96,12 +119,6 @@ def _valid_session_spec() -> dict[str, object]:
                 "host": "127.0.0.1",
                 "port": 4096,
             },
-            "config": {
-                "provider": "azure",
-                "model": "gpt-test",
-                "wire_api": "responses",
-            },
-            "required_env_vars": ["AZURE_OPENAI_BASE_URL", "AZURE_OPENAI_API_KEY"],
         },
         "tool_profile": {},
         "mcp_profile": {},

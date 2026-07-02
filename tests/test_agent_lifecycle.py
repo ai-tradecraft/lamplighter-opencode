@@ -342,12 +342,6 @@ def _agent_spec() -> dict[str, object]:
         "backend": {
             "kind": "opencode",
             "server": {"host": "127.0.0.1", "port": 4096},
-            "config": {
-                "provider": "azure",
-                "model": "azure/{env:AZURE_OPENAI_DEPLOYMENT}",
-                "wire_api": "responses",
-            },
-            "required_env_vars": [],
         },
         "tool_profile": {},
         "mcp_profile": {},
