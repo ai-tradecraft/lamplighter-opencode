@@ -107,6 +107,28 @@ app.MapPost("/api/v1/controllers/{controllerId}/commands/{commandId}/acknowledge
     };
 });
 
+app.MapPost("/api/v1/controllers/{controllerId}/commands/{commandId}/lease-renewals", async (
+    string controllerId,
+    string commandId,
+    ControllerCommandLeaseRenewal renewal,
+    RunnerControlStore runnerStore,
+    CancellationToken cancellationToken) =>
+{
+    if (!controllerId.Equals(renewal.ControllerId, StringComparison.Ordinal)
+        || !commandId.Equals(renewal.CommandId, StringComparison.Ordinal))
+    {
+        return Results.BadRequest(new { message = "Route and lease-renewal identifiers must match." });
+    }
+
+    var result = await runnerStore.RenewCommandLeaseAsync(renewal, cancellationToken);
+    return result.Status switch
+    {
+        ControllerCommandMutationStatus.NotFound => Results.NotFound(),
+        ControllerCommandMutationStatus.Conflict => Results.Conflict(new { message = result.Message }),
+        _ => Results.Ok(result.Command?.Execution.Lease)
+    };
+});
+
 app.MapPost("/api/v1/controllers/{controllerId}/commands/{commandId}/completion", async (
     string controllerId,
     string commandId,
@@ -1242,6 +1264,8 @@ public sealed class RunnerControlStore
         _idempotencyRecords = new();
     private readonly ConcurrentDictionary<string, ControllerCommandAcknowledgement>
         _acknowledgements = new();
+    private readonly ConcurrentDictionary<string, ControllerCommandLeaseRenewal>
+        _leaseRenewals = new();
     private readonly ConcurrentDictionary<string, ControllerCommandCompletion> _completions = new();
     private readonly ConcurrentBag<ControllerEvent> _events = [];
     private readonly ConcurrentDictionary<string, StoredClaimCheckContent> _content = new();
@@ -1268,6 +1292,7 @@ public sealed class RunnerControlStore
         LoadCommands();
         LoadIdempotencyRecords();
         LoadAcknowledgements();
+        LoadLeaseRenewals();
         LoadCompletions();
         LoadEvents();
         LoadContentMetadata();
@@ -1438,6 +1463,93 @@ public sealed class RunnerControlStore
             return ControllerCommandMutationResult.Ok(
                 claimed,
                 acknowledgement: accepted);
+        }
+        finally
+        {
+            _commandMutationLock.Release();
+        }
+    }
+
+    public async Task<ControllerCommandMutationResult> RenewCommandLeaseAsync(
+        ControllerCommandLeaseRenewal renewal,
+        CancellationToken cancellationToken)
+    {
+        await _commandMutationLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (!_commands.TryGetValue(renewal.CommandId, out var command))
+            {
+                return ControllerCommandMutationResult.NotFound();
+            }
+
+            if (_leaseRenewals.TryGetValue(renewal.RenewalId, out var existingRenewal))
+            {
+                return LeaseRenewalsEquivalent(existingRenewal, renewal)
+                    ? ControllerCommandMutationResult.Ok(
+                        command,
+                        renewal: existingRenewal)
+                    : ControllerCommandMutationResult.Conflict(
+                        "Command lease renewal conflicts with the first renewal request.");
+            }
+
+            if (_completions.ContainsKey(command.CommandId))
+            {
+                return ControllerCommandMutationResult.Conflict(
+                    "Command is already complete.");
+            }
+
+            var lease = command.Execution.Lease;
+            if (lease is null)
+            {
+                return ControllerCommandMutationResult.Conflict(
+                    "Command cannot renew a missing lease.");
+            }
+
+            if (!lease.ControllerId.Equals(renewal.ControllerId, StringComparison.Ordinal)
+                || !lease.LeaseId.Equals(renewal.LeaseId, StringComparison.Ordinal)
+                || lease.FencingToken != renewal.FencingToken)
+            {
+                return ControllerCommandMutationResult.Conflict(
+                    "Command lease does not match renewal.");
+            }
+
+            var now = _timeProvider.GetUtcNow();
+            if (lease.ExpiresAt <= now)
+            {
+                return ControllerCommandMutationResult.Conflict(
+                    "Command lease is expired and must be claimed again.");
+            }
+
+            if (renewal.RequestedExpiresAt <= lease.ExpiresAt)
+            {
+                return ControllerCommandMutationResult.Conflict(
+                    "Command lease renewal must extend the current lease.");
+            }
+
+            var renewedLease = lease with
+            {
+                ExpiresAt = Min(
+                    Min(renewal.RequestedExpiresAt, now + DefaultLeaseDuration),
+                    command.Execution.Deadline)
+            };
+            var renewedCommand = command with
+            {
+                Execution = command.Execution with { Lease = renewedLease }
+            };
+            var acceptedRenewal = renewal with { Correlation = command.Correlation };
+            await WriteJsonAsync(
+                CommandPath(command.CommandId),
+                renewedCommand,
+                cancellationToken);
+            await WriteJsonAsync(
+                LeaseRenewalPath(renewal.RenewalId),
+                acceptedRenewal,
+                cancellationToken);
+            _commands[command.CommandId] = renewedCommand;
+            _leaseRenewals[renewal.RenewalId] = acceptedRenewal;
+            return ControllerCommandMutationResult.Ok(
+                renewedCommand,
+                renewal: acceptedRenewal);
         }
         finally
         {
@@ -1673,6 +1785,27 @@ public sealed class RunnerControlStore
         }
     }
 
+    private void LoadLeaseRenewals()
+    {
+        var root = LeaseRenewalRoot();
+        if (!Directory.Exists(root))
+        {
+            return;
+        }
+
+        foreach (var path in Directory.EnumerateFiles(root, "*.json"))
+        {
+            var renewal =
+                JsonSerializer.Deserialize<ControllerCommandLeaseRenewal>(
+                    File.ReadAllText(path),
+                    ControllerProtocolJson.Options);
+            if (renewal is not null)
+            {
+                _leaseRenewals[renewal.RenewalId] = renewal;
+            }
+        }
+    }
+
     private void LoadCompletions()
     {
         var root = CompletionRoot();
@@ -1767,6 +1900,10 @@ public sealed class RunnerControlStore
         Path.Combine(ControllerRoot(), "acknowledgements");
     private string AcknowledgementPath(string commandId) =>
         Path.Combine(AcknowledgementRoot(), $"{commandId}.json");
+    private string LeaseRenewalRoot() =>
+        Path.Combine(ControllerRoot(), "lease-renewals");
+    private string LeaseRenewalPath(string renewalId) =>
+        Path.Combine(LeaseRenewalRoot(), $"{renewalId}.json");
     private string CompletionRoot() => Path.Combine(ControllerRoot(), "completions");
     private string CompletionPath(string commandId) => Path.Combine(CompletionRoot(), $"{commandId}.json");
     private string ControllerEventsPath() => Path.Combine(ControllerRoot(), "events.jsonl");
@@ -1852,6 +1989,37 @@ public sealed class RunnerControlStore
             right.FencingToken,
             Result = NormalizeContentReference(right.ResultRef),
             Error = NormalizeError(right.Error),
+            right.Extensions
+        });
+    }
+
+    private static bool LeaseRenewalsEquivalent(
+        ControllerCommandLeaseRenewal left,
+        ControllerCommandLeaseRenewal right)
+    {
+        return ControllerCommandIdempotency.SemanticHash(new
+        {
+            left.MessageType,
+            left.ProtocolVersion,
+            left.SchemaVersion,
+            left.RenewalId,
+            left.CommandId,
+            left.ControllerId,
+            left.LeaseId,
+            left.FencingToken,
+            left.RequestedExpiresAt,
+            left.Extensions
+        }) == ControllerCommandIdempotency.SemanticHash(new
+        {
+            right.MessageType,
+            right.ProtocolVersion,
+            right.SchemaVersion,
+            right.RenewalId,
+            right.CommandId,
+            right.ControllerId,
+            right.LeaseId,
+            right.FencingToken,
+            right.RequestedExpiresAt,
             right.Extensions
         });
     }
@@ -1948,25 +2116,28 @@ public sealed record ControllerCommandMutationResult(
     ControllerCommandMutationStatus Status,
     ControllerCommand? Command,
     ControllerCommandAcknowledgement? Acknowledgement,
+    ControllerCommandLeaseRenewal? Renewal,
     ControllerCommandCompletion? Completion,
     string? Message)
 {
     public static ControllerCommandMutationResult Ok(
         ControllerCommand command,
         ControllerCommandAcknowledgement? acknowledgement = null,
+        ControllerCommandLeaseRenewal? renewal = null,
         ControllerCommandCompletion? completion = null) =>
         new(
             ControllerCommandMutationStatus.Ok,
             command,
             acknowledgement,
+            renewal,
             completion,
             null);
 
     public static ControllerCommandMutationResult NotFound() =>
-        new(ControllerCommandMutationStatus.NotFound, null, null, null, null);
+        new(ControllerCommandMutationStatus.NotFound, null, null, null, null, null);
 
     public static ControllerCommandMutationResult Conflict(string message) =>
-        new(ControllerCommandMutationStatus.Conflict, null, null, null, message);
+        new(ControllerCommandMutationStatus.Conflict, null, null, null, null, message);
 }
 
 public readonly record struct StoredClaimCheckContent(ContentReference ContentRef, byte[] Bytes)

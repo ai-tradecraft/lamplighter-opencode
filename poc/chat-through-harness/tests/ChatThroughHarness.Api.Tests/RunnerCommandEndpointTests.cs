@@ -221,6 +221,72 @@ public sealed class RunnerCommandEndpointTests(
     }
 
     [Fact]
+    public async Task CommandLeaseRenewal_WhenLeaseMatches_ThenReturnsRenewedLease()
+    {
+        // Arrange
+        using var client = factory.CreateClient();
+        const string controllerId = "controller_lease_renewal";
+        await PostHeartbeatAsync(client, controllerId);
+        var agentResponse = await client.PostAsJsonAsync(
+            $"/api/agent-controllers/{controllerId}/agents",
+            new CreateAgentRequest());
+        agentResponse.EnsureSuccessStatusCode();
+        var command = Assert.Single(
+            await PollCommandsAsync(client, controllerId),
+            candidate =>
+                candidate.CommandType == ControllerCommandTypes.StartAgentRuntime);
+        var acknowledgement = new ControllerCommandAcknowledgement(
+            ControllerMessageTypes.CommandAcknowledgement,
+            ControllerProtocolVersions.Protocol,
+            ControllerProtocolVersions.Schema,
+            "ack_lease_renewal",
+            command.CommandId,
+            controllerId,
+            CommandAcknowledgementStatuses.Accepted,
+            DateTimeOffset.UtcNow,
+            command.Correlation);
+        using var ackResponse = await client.PostAsJsonAsync(
+            $"/api/v1/controllers/{controllerId}/commands/{command.CommandId}" +
+            "/acknowledgements",
+            acknowledgement,
+            ControllerProtocolJson.Options);
+        ackResponse.EnsureSuccessStatusCode();
+        var accepted = Assert.IsType<ControllerCommandAcknowledgement>(
+            await ackResponse.Content.ReadFromJsonAsync<
+                ControllerCommandAcknowledgement>(
+                ControllerProtocolJson.Options));
+        var lease = Assert.IsType<CommandLease>(accepted.Lease);
+        var renewal = new ControllerCommandLeaseRenewal(
+            ControllerMessageTypes.CommandLeaseRenewal,
+            ControllerProtocolVersions.Protocol,
+            ControllerProtocolVersions.Schema,
+            "renewal_endpoint",
+            command.CommandId,
+            controllerId,
+            lease.LeaseId,
+            lease.FencingToken,
+            DateTimeOffset.UtcNow.AddMinutes(5),
+            DateTimeOffset.UtcNow,
+            command.Correlation);
+
+        // Act
+        using var renewalResponse = await client.PostAsJsonAsync(
+            $"/api/v1/controllers/{controllerId}/commands/{command.CommandId}" +
+            "/lease-renewals",
+            renewal,
+            ControllerProtocolJson.Options);
+        renewalResponse.EnsureSuccessStatusCode();
+        var renewedLease = Assert.IsType<CommandLease>(
+            await renewalResponse.Content.ReadFromJsonAsync<CommandLease>(
+                ControllerProtocolJson.Options));
+
+        // Assert
+        Assert.Equal(lease.LeaseId, renewedLease.LeaseId);
+        Assert.Equal(lease.FencingToken, renewedLease.FencingToken);
+        Assert.True(renewedLease.ExpiresAt >= lease.ExpiresAt);
+    }
+
+    [Fact]
     public async Task SubmitTurn_WhenOutcomeEventArrives_ThenProjectsResult()
     {
         // Arrange

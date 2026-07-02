@@ -228,6 +228,93 @@ public sealed class RunnerControlStoreTests
     }
 
     [Fact]
+    public async Task RenewCommandLeaseAsync_WhenRequestIsValid_ThenExtendsLeaseWithinBounds()
+    {
+        // Arrange
+        var timeProvider = new ManualTimeProvider(DateTimeOffset.UtcNow);
+        var root = NewRuntimeRoot();
+        var store = new RunnerControlStore(root, timeProvider);
+        var command = Command();
+        await store.EnqueueCommandAsync(command, CancellationToken.None);
+        var acknowledged = await store.AcknowledgeCommandAsync(
+            Acknowledgement(command),
+            CancellationToken.None);
+        var claimed = Assert.IsType<ControllerCommand>(acknowledged.Command);
+        var lease = Assert.IsType<CommandLease>(claimed.Execution.Lease);
+        timeProvider.Advance(TimeSpan.FromSeconds(30));
+
+        // Act
+        var renewed = await store.RenewCommandLeaseAsync(
+            Renewal(claimed, lease, timeProvider.GetUtcNow().AddMinutes(5)),
+            CancellationToken.None);
+
+        // Assert
+        Assert.Equal(ControllerCommandMutationStatus.Ok, renewed.Status);
+        var renewedLease = Assert.IsType<CommandLease>(renewed.Command?.Execution.Lease);
+        Assert.Equal(lease.LeaseId, renewedLease.LeaseId);
+        Assert.Equal(lease.Attempt, renewedLease.Attempt);
+        Assert.Equal(lease.FencingToken, renewedLease.FencingToken);
+        Assert.Equal(timeProvider.GetUtcNow().AddSeconds(60), renewedLease.ExpiresAt);
+        Assert.True(
+            File.Exists(
+                Path.Combine(
+                    root,
+                    "controller-v1",
+                    "lease-renewals",
+                    "renewal_1.json")));
+    }
+
+    [Fact]
+    public async Task RenewCommandLeaseAsync_WhenLeaseIdentityDiffers_ThenConflicts()
+    {
+        // Arrange
+        var timeProvider = new ManualTimeProvider(DateTimeOffset.UtcNow);
+        var store = new RunnerControlStore(NewRuntimeRoot(), timeProvider);
+        var command = Command();
+        await store.EnqueueCommandAsync(command, CancellationToken.None);
+        var acknowledged = await store.AcknowledgeCommandAsync(
+            Acknowledgement(command),
+            CancellationToken.None);
+        var claimed = Assert.IsType<ControllerCommand>(acknowledged.Command);
+        var lease = Assert.IsType<CommandLease>(claimed.Execution.Lease);
+
+        // Act
+        var result = await store.RenewCommandLeaseAsync(
+            Renewal(claimed, lease, timeProvider.GetUtcNow().AddMinutes(5)) with
+            {
+                LeaseId = "lease_other"
+            },
+            CancellationToken.None);
+
+        // Assert
+        Assert.Equal(ControllerCommandMutationStatus.Conflict, result.Status);
+    }
+
+    [Fact]
+    public async Task RenewCommandLeaseAsync_WhenLeaseExpired_ThenConflicts()
+    {
+        // Arrange
+        var timeProvider = new ManualTimeProvider(DateTimeOffset.UtcNow);
+        var store = new RunnerControlStore(NewRuntimeRoot(), timeProvider);
+        var command = Command();
+        await store.EnqueueCommandAsync(command, CancellationToken.None);
+        var acknowledged = await store.AcknowledgeCommandAsync(
+            Acknowledgement(command),
+            CancellationToken.None);
+        var claimed = Assert.IsType<ControllerCommand>(acknowledged.Command);
+        var lease = Assert.IsType<CommandLease>(claimed.Execution.Lease);
+        timeProvider.Advance(TimeSpan.FromSeconds(61));
+
+        // Act
+        var result = await store.RenewCommandLeaseAsync(
+            Renewal(claimed, lease, timeProvider.GetUtcNow().AddMinutes(5)),
+            CancellationToken.None);
+
+        // Assert
+        Assert.Equal(ControllerCommandMutationStatus.Conflict, result.Status);
+    }
+
+    [Fact]
     public async Task CompleteCommandAsync_WhenFencingTokenMatches_ThenStopsRedelivery()
     {
         // Arrange
@@ -492,6 +579,25 @@ public sealed class RunnerControlStoreTests
             command.CommandId,
             "controller_1",
             CommandAcknowledgementStatuses.Accepted,
+            DateTimeOffset.UtcNow,
+            command.Correlation);
+    }
+
+    private static ControllerCommandLeaseRenewal Renewal(
+        ControllerCommand command,
+        CommandLease lease,
+        DateTimeOffset requestedExpiresAt)
+    {
+        return new ControllerCommandLeaseRenewal(
+            ControllerMessageTypes.CommandLeaseRenewal,
+            ControllerProtocolVersions.Protocol,
+            ControllerProtocolVersions.Schema,
+            "renewal_1",
+            command.CommandId,
+            lease.ControllerId,
+            lease.LeaseId,
+            lease.FencingToken,
+            requestedExpiresAt,
             DateTimeOffset.UtcNow,
             command.Correlation);
     }
