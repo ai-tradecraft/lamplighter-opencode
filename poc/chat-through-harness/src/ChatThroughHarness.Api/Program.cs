@@ -1247,14 +1247,24 @@ public sealed class RunnerControlStore
     private readonly ConcurrentDictionary<string, StoredClaimCheckContent> _content = new();
     private readonly ConcurrentDictionary<string, ControllerHeartbeat> _controllerHeartbeats = new();
     private readonly string _runtimeRoot;
+    private readonly TimeProvider _timeProvider;
 
-    public RunnerControlStore() : this(RuntimePaths.Root)
+    public RunnerControlStore() : this(RuntimePaths.Root, TimeProvider.System)
     {
     }
 
-    public RunnerControlStore(string runtimeRoot)
+    public RunnerControlStore(TimeProvider timeProvider) : this(RuntimePaths.Root, timeProvider)
+    {
+    }
+
+    public RunnerControlStore(string runtimeRoot) : this(runtimeRoot, TimeProvider.System)
+    {
+    }
+
+    public RunnerControlStore(string runtimeRoot, TimeProvider timeProvider)
     {
         _runtimeRoot = runtimeRoot;
+        _timeProvider = timeProvider;
         LoadCommands();
         LoadIdempotencyRecords();
         LoadAcknowledgements();
@@ -1309,7 +1319,7 @@ public sealed class RunnerControlStore
                 scope,
                 fingerprint,
                 command,
-                DateTimeOffset.UtcNow);
+                _timeProvider.GetUtcNow());
             await WriteJsonAsync(
                 IdempotencyPath(scope),
                 record,
@@ -1332,7 +1342,7 @@ public sealed class RunnerControlStore
         string controllerId,
         CancellationToken cancellationToken)
     {
-        var now = DateTimeOffset.UtcNow;
+        var now = _timeProvider.GetUtcNow();
         var commands = _commands.Values
             .Where(command => !_completions.ContainsKey(command.CommandId))
             .Where(command => command.AvailableAt is null || command.AvailableAt <= now)
@@ -1357,9 +1367,12 @@ public sealed class RunnerControlStore
                 return ControllerCommandMutationResult.NotFound();
             }
 
+            var now = _timeProvider.GetUtcNow();
+            var currentLease = command.Execution.Lease;
             if (_acknowledgements.TryGetValue(
                     acknowledgement.CommandId,
-                    out var existingAcknowledgement))
+                    out var existingAcknowledgement)
+                && (currentLease is null || currentLease.ExpiresAt > now))
             {
                 return AcknowledgementsEquivalent(
                     existingAcknowledgement,
@@ -1384,8 +1397,6 @@ public sealed class RunnerControlStore
                     "The POC command loop must accept a command before execution.");
             }
 
-            var now = DateTimeOffset.UtcNow;
-            var currentLease = command.Execution.Lease;
             if (currentLease is not null
                 && currentLease.ExpiresAt > now
                 && currentLease.ControllerId != acknowledgement.ControllerId)

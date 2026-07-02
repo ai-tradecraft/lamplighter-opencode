@@ -165,6 +165,69 @@ public sealed class RunnerControlStoreTests
     }
 
     [Fact]
+    public async Task GetAvailableCommandsAsync_WhenLeaseExpires_ThenReturnsCommandForRedelivery()
+    {
+        // Arrange
+        var timeProvider = new ManualTimeProvider(DateTimeOffset.UtcNow);
+        var store = new RunnerControlStore(NewRuntimeRoot(), timeProvider);
+        var command = Command();
+        await store.EnqueueCommandAsync(command, CancellationToken.None);
+        var acknowledged = await store.AcknowledgeCommandAsync(
+            Acknowledgement(command),
+            CancellationToken.None);
+        var claimed = Assert.IsType<ControllerCommand>(acknowledged.Command);
+        var lease = Assert.IsType<CommandLease>(claimed.Execution.Lease);
+        timeProvider.Advance(TimeSpan.FromSeconds(61));
+
+        // Act
+        var available = await store.GetAvailableCommandsAsync(
+            "controller_1",
+            CancellationToken.None);
+
+        // Assert
+        var redelivered = Assert.Single(available);
+        Assert.Equal(command.CommandId, redelivered.CommandId);
+        Assert.Equal(lease.LeaseId, redelivered.Execution.Lease?.LeaseId);
+    }
+
+    [Fact]
+    public async Task AcknowledgeCommandAsync_WhenLeaseExpired_ThenCreatesNewDeliveryAttempt()
+    {
+        // Arrange
+        var timeProvider = new ManualTimeProvider(DateTimeOffset.UtcNow);
+        var store = new RunnerControlStore(NewRuntimeRoot(), timeProvider);
+        var command = Command();
+        await store.EnqueueCommandAsync(command, CancellationToken.None);
+        var first = await store.AcknowledgeCommandAsync(
+            Acknowledgement(command),
+            CancellationToken.None);
+        var firstCommand = Assert.IsType<ControllerCommand>(first.Command);
+        var firstLease = Assert.IsType<CommandLease>(firstCommand.Execution.Lease);
+        timeProvider.Advance(TimeSpan.FromSeconds(61));
+
+        // Act
+        var second = await store.AcknowledgeCommandAsync(
+            Acknowledgement(command) with
+            {
+                AcknowledgementId = "ack_2",
+                AcknowledgedAt = timeProvider.GetUtcNow()
+            },
+            CancellationToken.None);
+
+        // Assert
+        Assert.Equal(ControllerCommandMutationStatus.Ok, second.Status);
+        var secondCommand = Assert.IsType<ControllerCommand>(second.Command);
+        var secondLease = Assert.IsType<CommandLease>(secondCommand.Execution.Lease);
+        Assert.NotEqual(firstLease.LeaseId, secondLease.LeaseId);
+        Assert.Equal(2, secondLease.Attempt);
+        Assert.Equal(2, secondLease.FencingToken);
+        Assert.Equal(
+            firstCommand.Correlation.AttemptId,
+            secondCommand.Correlation.AttemptId);
+        Assert.Equal("ack_2", second.Acknowledgement?.AcknowledgementId);
+    }
+
+    [Fact]
     public async Task CompleteCommandAsync_WhenFencingTokenMatches_ThenStopsRedelivery()
     {
         // Arrange
@@ -431,6 +494,21 @@ public sealed class RunnerControlStoreTests
             CommandAcknowledgementStatuses.Accepted,
             DateTimeOffset.UtcNow,
             command.Correlation);
+    }
+
+    private sealed class ManualTimeProvider(DateTimeOffset utcNow) : TimeProvider
+    {
+        private DateTimeOffset _utcNow = utcNow;
+
+        public override DateTimeOffset GetUtcNow()
+        {
+            return _utcNow;
+        }
+
+        public void Advance(TimeSpan duration)
+        {
+            _utcNow += duration;
+        }
     }
 
     private static ControllerCommand EquivalentRetry(
