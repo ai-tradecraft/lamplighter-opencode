@@ -58,7 +58,19 @@ public sealed class RunnerWorker(
                 Runtimes: agents.Select(ToRuntimeResource).ToImmutableArray(),
                 Sessions: agents
                     .SelectMany(ToSessionResources)
-                    .ToImmutableArray()));
+                    .ToImmutableArray()),
+            Extensions: ImmutableDictionary<string, JsonElement>.Empty.Add(
+                "tradecraft.adapter.capabilities",
+                JsonSerializer.SerializeToElement(new
+                {
+                    adapter_kind = "opencode",
+                    adapter_version = "0.1.0",
+                    snapshot_capture = true,
+                    snapshot_restore = true,
+                    restoration_modes = new[] { "inspection" },
+                    consistency_modes = new[] { "crash-consistent" },
+                    transfer_profiles = new[] { "local-content-handle" }
+                })));
 
         await apiClient.UpsertHeartbeatAsync(heartbeat, cancellationToken);
         logger.LogInformation(

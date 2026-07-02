@@ -20,9 +20,11 @@ from lamplighter_opencode.runtime.layout import agent_layout
 from lamplighter_opencode.runtime.workspace import (
     cancel_agent_session,
     create_agent_session,
+    create_agent_snapshot,
     get_agent_session_history,
     materialize_agent,
     materialize_session_workspace,
+    restore_agent_snapshot,
     start_agent,
     start_opencode_server,
     stop_agent,
@@ -192,6 +194,64 @@ def cancel_session_command(
         typer.echo(json.dumps(metadata, indent=2))
         return
     console.print(f"Cancelled session {session}")
+
+
+@app.command("create-snapshot")
+def create_snapshot_command(
+    agent: Annotated[str, typer.Option()],
+    controller_workspace: ControllerWorkspaceOption,
+    session: Annotated[str | None, typer.Option(help="Optional child session to include.")] = None,
+    purpose: Annotated[str, typer.Option(help="Snapshot purpose, such as recovery or diagnostic.")] = "recovery",
+    initiator: Annotated[str, typer.Option(help="Snapshot initiator identity or role.")] = "adapter",
+    consistency: Annotated[str, typer.Option(help="Reported consistency level.")] = "crash-consistent",
+    checkpoint_candidate: Annotated[
+        bool, typer.Option(help="Whether this snapshot is nominated for checkpoint evaluation.")
+    ] = False,
+    json_output: JsonOutputOption = False,
+) -> None:
+    """Capture an agent workspace and runtime metadata as a local snapshot."""
+    try:
+        descriptor = create_agent_snapshot(
+            controller_workspace,
+            agent,
+            session_id=session,
+            purpose=purpose,
+            initiator=initiator,
+            consistency=consistency,
+            checkpoint_candidate=checkpoint_candidate,
+        )
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        console.print(f"[red]Failed to create snapshot:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    if json_output:
+        typer.echo(json.dumps(descriptor, indent=2))
+        return
+    console.print(f"Created snapshot {descriptor['snapshot_id']} for agent {agent}")
+
+
+@app.command("restore-snapshot")
+def restore_snapshot_command(
+    snapshot: Annotated[
+        Path, typer.Option(exists=True, readable=True, dir_okay=False, help="Snapshot descriptor JSON.")
+    ],
+    controller_workspace: ControllerWorkspaceOption,
+    restored_agent: Annotated[str | None, typer.Option(help="Optional restored agent id.")] = None,
+    json_output: JsonOutputOption = False,
+) -> None:
+    """Restore a local snapshot as an inspection-only agent workspace."""
+    try:
+        result = restore_agent_snapshot(
+            snapshot,
+            controller_workspace,
+            restored_agent_id=restored_agent,
+        )
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        console.print(f"[red]Failed to restore snapshot:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    if json_output:
+        typer.echo(json.dumps(result, indent=2))
+        return
+    console.print(f"Restored snapshot {result['snapshot_id']} as {result['restored_agent_id']}")
 
 
 @app.command("get-session-history")

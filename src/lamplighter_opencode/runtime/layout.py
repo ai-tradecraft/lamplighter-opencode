@@ -26,6 +26,7 @@ class AgentLayout:
     runtime_dir: Path
     logs_dir: Path
     sessions_dir: Path
+    snapshots_dir: Path
     backend_config_path: Path
     server_metadata_path: Path
 
@@ -63,6 +64,7 @@ def agent_layout(controller_workspace: Path, agent_id: str) -> AgentLayout:
         runtime_dir=runtime_dir,
         logs_dir=runtime_dir / "logs",
         sessions_dir=runtime_dir / "sessions",
+        snapshots_dir=runtime_dir / "snapshots",
         backend_config_path=runtime_dir / "opencode-backend.json",
         server_metadata_path=runtime_dir / "opencode-server.json",
     )
@@ -93,7 +95,7 @@ def materialize_controller_layout(controller_workspace: Path) -> ControllerLayou
 def materialize_agent_layout(controller_workspace: Path, agent_id: str) -> AgentLayout:
     materialize_controller_layout(controller_workspace)
     layout = agent_layout(controller_workspace, agent_id)
-    for directory in (layout.workspace_dir, layout.logs_dir, layout.sessions_dir):
+    for directory in (layout.workspace_dir, layout.logs_dir, layout.sessions_dir, layout.snapshots_dir):
         directory.mkdir(parents=True, exist_ok=True)
     return layout
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import shutil
 import signal
 import socket
 import subprocess
@@ -17,6 +18,7 @@ from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlencode, urlparse, urlunparse
@@ -43,6 +45,8 @@ from lamplighter_opencode.runtime.layout import (
 )
 
 OPENCODE_CONFIG_MODES = {"inherit-global", "project-only", "managed"}
+SNAPSHOT_SCHEMA_VERSION = "0.1"
+SNAPSHOT_RESTORATION_MODE = "inspection"
 
 
 class OpenCodeServerError(RuntimeError):
@@ -231,6 +235,208 @@ def cancel_agent_session(controller_workspace: Path, agent_id: str, session_id: 
     metadata["ended_at"] = datetime.now(UTC).isoformat()
     _write_json(layout.metadata_path, metadata)
     return metadata
+
+
+def create_agent_snapshot(
+    controller_workspace: Path,
+    agent_id: str,
+    *,
+    session_id: str | None = None,
+    purpose: str = "recovery",
+    initiator: str = "adapter",
+    consistency: str = "crash-consistent",
+    checkpoint_candidate: bool = False,
+) -> dict[str, Any]:
+    """Capture an agent workspace and runtime metadata as a local snapshot.
+
+    This adapter-local snapshot does not publish to Asset Storage and does not
+    commit a workflow checkpoint. It returns bounded local handles that the
+    controller can transfer in a later protocol slice.
+    """
+    layout = agent_layout(controller_workspace, agent_id)
+    if not layout.metadata_path.exists():
+        raise ValueError(f"Agent is not prepared: {agent_id}")
+
+    with _agent_lifecycle_lock(layout.runtime_dir):
+        snapshot_id = f"snapshot_{uuid.uuid4().hex}"
+        captured_at = datetime.now(UTC).isoformat()
+        snapshot_root = layout.snapshots_dir / snapshot_id
+        components_dir = snapshot_root / "components"
+        workspace_snapshot_dir = snapshot_root / "workspace"
+        snapshot_root.mkdir(parents=True, exist_ok=False)
+        components_dir.mkdir(parents=True)
+
+        workspace_files = _copy_workspace_tree(layout.workspace_dir, workspace_snapshot_dir)
+        workspace_manifest = {
+            "kind": "workspace_filesystem",
+            "source": "agent_workspace",
+            "root": "workspace",
+            "files": workspace_files,
+        }
+        workspace_manifest_path = components_dir / "workspace-manifest.json"
+        _write_json(workspace_manifest_path, workspace_manifest)
+
+        metadata_components = _capture_metadata_components(
+            layout,
+            components_dir,
+            session_id=session_id,
+        )
+        components = [
+            _component_entry(
+                snapshot_root,
+                workspace_manifest_path,
+                "workspace_filesystem_manifest",
+                required_for_restoration=True,
+            ),
+            *metadata_components,
+        ]
+
+        manifest = {
+            "schema_version": SNAPSHOT_SCHEMA_VERSION,
+            "snapshot_id": snapshot_id,
+            "created_at": captured_at,
+            "adapter": {
+                "kind": "opencode",
+                "package": "lamplighter-opencode",
+                "version": "0.1.0",
+            },
+            "target": {
+                "agent_id": agent_id,
+                "session_id": session_id,
+            },
+            "consistency": {
+                "level": consistency,
+                "provider_quiesced": False,
+                "notes": "Local adapter capture; OpenCode provider state is referenced but not resumed.",
+            },
+            "restoration": {
+                "mode": SNAPSHOT_RESTORATION_MODE,
+                "resumable": False,
+                "recipe": "Verify manifest digests, copy workspace files, and restore metadata as inspection-only.",
+            },
+            "capture_watermark": {
+                "controller_event_sequence": None,
+                "active_command_id": None,
+                "fencing_token": None,
+            },
+            "side_effects": {
+                "state": "unknown",
+                "requires_reconciliation": True,
+                "notes": "Controller reconciliation is required before any future resumable restore.",
+            },
+            "components": components,
+        }
+        manifest_path = snapshot_root / "manifest.json"
+        _write_json(manifest_path, manifest)
+
+        descriptor = {
+            "schema_version": SNAPSHOT_SCHEMA_VERSION,
+            "snapshot_id": snapshot_id,
+            "snapshot_ref": f"local-snapshot://{agent_id}/{snapshot_id}",
+            "status": "content_ready",
+            "purpose": purpose,
+            "initiator": initiator,
+            "created_at": captured_at,
+            "target": {
+                "agent_id": agent_id,
+                "session_id": session_id,
+            },
+            "consistency_level": consistency,
+            "restoration_mode": SNAPSHOT_RESTORATION_MODE,
+            "portability": "local-opencode-inspection",
+            "checkpoint_candidate": checkpoint_candidate,
+            "manifest": {
+                "path": "manifest.json",
+                "digest": _file_digest(manifest_path),
+                "content_ref": f"local-snapshot://{agent_id}/{snapshot_id}/manifest.json",
+            },
+            "local_handle": {
+                "root": str(snapshot_root),
+                "scope": "agent-runtime-snapshot",
+            },
+        }
+        descriptor_path = snapshot_root / "descriptor.json"
+        _write_json(descriptor_path, descriptor)
+        return {**descriptor, "descriptor_path": str(descriptor_path)}
+
+
+def restore_agent_snapshot(
+    descriptor_path: Path,
+    controller_workspace: Path,
+    *,
+    restored_agent_id: str | None = None,
+) -> dict[str, Any]:
+    """Verify a local snapshot and restore it as an inspection-only agent."""
+    descriptor = _read_json(descriptor_path)
+    snapshot_root = descriptor_path.expanduser().resolve().parent
+    manifest_info = descriptor.get("manifest")
+    if not isinstance(manifest_info, dict):
+        raise ValueError("Snapshot descriptor is missing manifest details.")
+
+    manifest_path = _snapshot_child(snapshot_root, str(manifest_info.get("path") or "manifest.json"))
+    expected_manifest_digest = str(manifest_info.get("digest") or "")
+    if _file_digest(manifest_path) != expected_manifest_digest:
+        raise ValueError("Snapshot manifest digest mismatch.")
+
+    manifest = _read_json(manifest_path)
+    components = manifest.get("components")
+    if not isinstance(components, list):
+        raise ValueError("Snapshot manifest must contain components.")
+    for component in components:
+        if not isinstance(component, dict):
+            raise ValueError("Snapshot manifest component must be an object.")
+        component_path = _snapshot_child(snapshot_root, str(component.get("path") or ""))
+        if _file_digest(component_path) != component.get("digest"):
+            raise ValueError(f"Snapshot component digest mismatch: {component.get('path')}")
+
+    workspace_manifest = _workspace_manifest(snapshot_root, components)
+    source_target_value = manifest.get("target")
+    source_target: dict[str, Any] = source_target_value if isinstance(source_target_value, dict) else {}
+    descriptor_target_value = descriptor.get("target")
+    descriptor_target: dict[str, Any] = descriptor_target_value if isinstance(descriptor_target_value, dict) else {}
+    source_agent_id = str(source_target.get("agent_id") or descriptor_target.get("agent_id") or "agent_unknown")
+    target_agent_id = restored_agent_id or f"{source_agent_id}_restored_{uuid.uuid4().hex[:8]}"
+    restored = materialize_agent_layout(controller_workspace, target_agent_id)
+    _restore_workspace(snapshot_root, workspace_manifest, restored.workspace_dir)
+
+    source_agent_metadata = _component_json(snapshot_root, components, "agent_metadata") or {}
+    restored_agent_metadata = {
+        **source_agent_metadata,
+        "agent_id": target_agent_id,
+        "status": "restored",
+        "restoration_mode": SNAPSHOT_RESTORATION_MODE,
+        "source_agent_id": source_agent_id,
+        "source_snapshot_id": descriptor["snapshot_id"],
+        "restored_at": datetime.now(UTC).isoformat(),
+    }
+    _write_json(restored.metadata_path, restored_agent_metadata)
+    _write_json(
+        restored.server_metadata_path,
+        {
+            "status": "restored",
+            "restoration_mode": SNAPSHOT_RESTORATION_MODE,
+            "source_agent_id": source_agent_id,
+            "source_snapshot_id": descriptor["snapshot_id"],
+        },
+    )
+
+    sessions_restored = _restore_sessions(
+        snapshot_root, components, restored, target_agent_id, descriptor["snapshot_id"]
+    )
+    return {
+        "snapshot_id": descriptor["snapshot_id"],
+        "status": "restored",
+        "restoration_mode": SNAPSHOT_RESTORATION_MODE,
+        "resumable": False,
+        "source_agent_id": source_agent_id,
+        "restored_agent_id": target_agent_id,
+        "workspace_path": str(restored.workspace_dir),
+        "runtime_path": str(restored.runtime_dir),
+        "sessions_restored": sessions_restored,
+        "diagnostics": [
+            "Snapshot restored for inspection only; controller reconciliation is required before any resumable restore."
+        ],
+    }
 
 
 def materialize_session_workspace(
@@ -644,7 +850,9 @@ def stop_agent(layout: AgentLayout) -> dict[str, Any]:
                 session["ended_at"] = session.get("ended_at") or stopped_at
                 session["closed_reason"] = "Parent agent stopped."
                 _write_json(session_path, session)
-                closed_sessions.append(str(session.get("agent_session_id") or session.get("session_id") or session_path.parent.name))
+                closed_sessions.append(
+                    str(session.get("agent_session_id") or session.get("session_id") or session_path.parent.name)
+                )
         metadata["closed_sessions"] = closed_sessions
         _write_json(layout.server_metadata_path, metadata)
         return metadata
@@ -1120,6 +1328,183 @@ def _metadata_agent_session_id(root: Path) -> str:
     session = _read_json(root / "session.json") if (root / "session.json").exists() else {}
     value = session.get("agent_session_id") or root.name
     return str(value)
+
+
+def _copy_workspace_tree(source_root: Path, destination_root: Path) -> list[dict[str, Any]]:
+    if not source_root.exists():
+        destination_root.mkdir(parents=True, exist_ok=True)
+        return []
+
+    files: list[dict[str, Any]] = []
+    for source in sorted(path for path in source_root.rglob("*") if path.is_file() or path.is_symlink()):
+        if source.is_symlink():
+            raise ValueError(f"Snapshot capture does not support symlinks: {source}")
+        relative = source.relative_to(source_root)
+        if any(part in {"..", ""} for part in relative.parts):
+            raise ValueError(f"Unsafe workspace path: {relative}")
+        destination = destination_root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+        files.append(
+            {
+                "path": relative.as_posix(),
+                "size_bytes": destination.stat().st_size,
+                "digest": _file_digest(destination),
+                "content_ref": f"local-workspace-file://{relative.as_posix()}",
+            }
+        )
+    return files
+
+
+def _capture_metadata_components(
+    layout: AgentLayout,
+    components_dir: Path,
+    *,
+    session_id: str | None,
+) -> list[dict[str, Any]]:
+    components: list[dict[str, Any]] = []
+    for source, name, kind, required in (
+        (layout.metadata_path, "agent.json", "agent_metadata", True),
+        (layout.backend_config_path, "opencode-backend.json", "backend_config", False),
+        (layout.server_metadata_path, "opencode-server.json", "provider_server_metadata", False),
+    ):
+        if source.exists():
+            destination = components_dir / name
+            shutil.copy2(source, destination)
+            components.append(
+                _component_entry(components_dir.parent, destination, kind, required_for_restoration=required)
+            )
+
+    session_components: list[dict[str, Any]] = []
+    if layout.sessions_dir.exists():
+        session_paths = sorted(layout.sessions_dir.glob("*/session.json"))
+        if session_id is not None:
+            session_paths = [path for path in session_paths if path.parent.name == session_id]
+        for source in session_paths:
+            destination = components_dir / "sessions" / source.parent.name / "session.json"
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+            component = _component_entry(
+                components_dir.parent,
+                destination,
+                "agent_session_metadata",
+                required_for_restoration=False,
+            )
+            component["session_id"] = source.parent.name
+            session_components.append(component)
+    components.extend(session_components)
+    return components
+
+
+def _component_entry(
+    snapshot_root: Path,
+    path: Path,
+    kind: str,
+    *,
+    required_for_restoration: bool,
+) -> dict[str, Any]:
+    relative = path.relative_to(snapshot_root)
+    return {
+        "kind": kind,
+        "path": relative.as_posix(),
+        "digest": _file_digest(path),
+        "size_bytes": path.stat().st_size,
+        "required_for_restoration": required_for_restoration,
+        "sensitivity": "internal",
+        "retention_class": "recovery",
+        "adapter": {
+            "kind": "opencode",
+            "version": "0.1.0",
+        },
+    }
+
+
+def _file_digest(path: Path) -> str:
+    digest = sha256()
+    with path.open("rb") as input_file:
+        for chunk in iter(lambda: input_file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return f"sha256:{digest.hexdigest()}"
+
+
+def _snapshot_child(snapshot_root: Path, relative_path: str) -> Path:
+    if not relative_path:
+        raise ValueError("Snapshot path is required.")
+    root = snapshot_root.expanduser().resolve()
+    child = root.joinpath(relative_path).resolve()
+    if not child.is_relative_to(root):
+        raise ValueError(f"Snapshot path escapes snapshot root: {relative_path}")
+    return child
+
+
+def _workspace_manifest(snapshot_root: Path, components: list[Any]) -> dict[str, Any]:
+    value = _component_json(snapshot_root, components, "workspace_filesystem_manifest")
+    if value is None:
+        raise ValueError("Snapshot manifest is missing workspace filesystem manifest.")
+    files = value.get("files")
+    if not isinstance(files, list):
+        raise ValueError("Workspace filesystem manifest must contain files.")
+    return value
+
+
+def _component_json(snapshot_root: Path, components: list[Any], kind: str) -> dict[str, Any] | None:
+    for component in components:
+        if not isinstance(component, dict) or component.get("kind") != kind:
+            continue
+        path = _snapshot_child(snapshot_root, str(component.get("path") or ""))
+        return _read_json(path)
+    return None
+
+
+def _restore_workspace(snapshot_root: Path, workspace_manifest: dict[str, Any], destination_root: Path) -> None:
+    if destination_root.exists():
+        shutil.rmtree(destination_root)
+    destination_root.mkdir(parents=True)
+    source_root = _snapshot_child(snapshot_root, str(workspace_manifest.get("root") or "workspace"))
+    for item in workspace_manifest["files"]:
+        if not isinstance(item, dict):
+            raise ValueError("Workspace manifest file entry must be an object.")
+        relative = Path(str(item.get("path") or ""))
+        if relative.is_absolute() or ".." in relative.parts or not relative.parts:
+            raise ValueError(f"Unsafe workspace manifest path: {relative}")
+        source = source_root / relative
+        if _file_digest(source) != item.get("digest"):
+            raise ValueError(f"Workspace file digest mismatch: {relative.as_posix()}")
+        destination = destination_root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+
+
+def _restore_sessions(
+    snapshot_root: Path,
+    components: list[Any],
+    restored: AgentLayout,
+    target_agent_id: str,
+    snapshot_id: str,
+) -> list[str]:
+    sessions: list[str] = []
+    for component in components:
+        if not isinstance(component, dict) or component.get("kind") != "agent_session_metadata":
+            continue
+        source = _snapshot_child(snapshot_root, str(component.get("path") or ""))
+        metadata = _read_json(source)
+        session_id = str(
+            metadata.get("session_id") or metadata.get("agent_session_id") or component.get("session_id") or ""
+        )
+        if not session_id:
+            raise ValueError("Session snapshot component is missing a session id.")
+        session = agent_session_layout(restored.root.parent.parent, target_agent_id, session_id)
+        session.root.mkdir(parents=True, exist_ok=True)
+        metadata = {
+            **metadata,
+            "agent_id": target_agent_id,
+            "status": "restored",
+            "restoration_mode": SNAPSHOT_RESTORATION_MODE,
+            "source_snapshot_id": snapshot_id,
+        }
+        _write_json(session.metadata_path, metadata)
+        sessions.append(session_id)
+    return sessions
 
 
 def _read_json(path: Path) -> dict[str, Any]:

@@ -31,6 +31,9 @@ public sealed class RunnerCommandEndpointTests(
         Assert.Contains(
             payload.RootElement.GetProperty("capabilities").EnumerateArray(),
             capability => capability.GetString() == "multi-session-agents");
+        Assert.Contains(
+            payload.RootElement.GetProperty("capabilities").EnumerateArray(),
+            capability => capability.GetString() == "adapter-snapshots");
     }
 
     [Fact]

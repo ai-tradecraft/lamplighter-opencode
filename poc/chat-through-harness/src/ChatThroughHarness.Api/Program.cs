@@ -44,7 +44,8 @@ app.MapGet("/api/system/info", () => Results.Ok(new
     {
         "controller-workspaces",
         "agents",
-        "multi-session-agents"
+        "multi-session-agents",
+        "adapter-snapshots"
     }
 }));
 

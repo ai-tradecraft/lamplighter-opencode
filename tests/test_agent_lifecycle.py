@@ -275,6 +275,160 @@ def test_agent_owns_multiple_isolated_sessions(tmp_path: Path, monkeypatch) -> N
     assert json.loads(agent_layout(controller_workspace, "agent_one").metadata_path.read_text())["status"] == "planned"
 
 
+def test_create_and_restore_agent_snapshot(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("LAMPLIGHTER_OPENCODE_USE_REAL_BACKEND", raising=False)
+    controller_workspace = tmp_path / "controller"
+    spec_path = tmp_path / "agent-spec.json"
+    spec_path.write_text(json.dumps(_agent_spec()), encoding="utf-8")
+    runner.invoke(
+        app,
+        [
+            "prepare-agent",
+            "--spec",
+            str(spec_path),
+            "--controller-workspace",
+            str(controller_workspace),
+            "--skip-backend-env-check",
+        ],
+    )
+    runner.invoke(
+        app,
+        [
+            "start-agent",
+            "--agent",
+            "agent_one",
+            "--controller-workspace",
+            str(controller_workspace),
+            "--dry-run",
+        ],
+    )
+    session_spec_path = tmp_path / "session.json"
+    session_spec_path.write_text(json.dumps(_session_spec("session_one")), encoding="utf-8")
+    created = runner.invoke(
+        app,
+        [
+            "create-session",
+            "--agent",
+            "agent_one",
+            "--spec",
+            str(session_spec_path),
+            "--controller-workspace",
+            str(controller_workspace),
+        ],
+    )
+    assert created.exit_code == 0, created.stdout
+    original = agent_layout(controller_workspace, "agent_one")
+    workspace_file = original.workspace_dir / "notes" / "plan.md"
+    workspace_file.parent.mkdir(parents=True)
+    workspace_file.write_text("# Plan\n\nKeep this file restorable.\n", encoding="utf-8")
+
+    snapshot = runner.invoke(
+        app,
+        [
+            "create-snapshot",
+            "--agent",
+            "agent_one",
+            "--session",
+            "session_one",
+            "--controller-workspace",
+            str(controller_workspace),
+            "--json",
+        ],
+    )
+
+    assert snapshot.exit_code == 0, snapshot.stdout
+    descriptor = json.loads(snapshot.stdout)
+    assert descriptor["status"] == "content_ready"
+    assert descriptor["restoration_mode"] == "inspection"
+    assert descriptor["manifest"]["digest"].startswith("sha256:")
+    descriptor_path = Path(descriptor["descriptor_path"])
+    assert descriptor_path.exists()
+
+    restored = runner.invoke(
+        app,
+        [
+            "restore-snapshot",
+            "--snapshot",
+            str(descriptor_path),
+            "--controller-workspace",
+            str(controller_workspace),
+            "--restored-agent",
+            "agent_restored",
+            "--json",
+        ],
+    )
+
+    assert restored.exit_code == 0, restored.stdout
+    restore_payload = json.loads(restored.stdout)
+    assert restore_payload["status"] == "restored"
+    assert restore_payload["resumable"] is False
+    assert restore_payload["sessions_restored"] == ["session_one"]
+    restored_layout = agent_layout(controller_workspace, "agent_restored")
+    assert (restored_layout.workspace_dir / "notes" / "plan.md").read_text(
+        encoding="utf-8"
+    ) == workspace_file.read_text(encoding="utf-8")
+    restored_agent = json.loads(restored_layout.metadata_path.read_text(encoding="utf-8"))
+    assert restored_agent["status"] == "restored"
+    restored_session = json.loads(
+        agent_session_layout(controller_workspace, "agent_restored", "session_one").metadata_path.read_text(
+            encoding="utf-8"
+        )
+    )
+    assert restored_session["status"] == "restored"
+
+
+def test_restore_snapshot_rejects_tampered_workspace_file(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("LAMPLIGHTER_OPENCODE_USE_REAL_BACKEND", raising=False)
+    controller_workspace = tmp_path / "controller"
+    spec_path = tmp_path / "agent-spec.json"
+    spec_path.write_text(json.dumps(_agent_spec()), encoding="utf-8")
+    runner.invoke(
+        app,
+        [
+            "prepare-agent",
+            "--spec",
+            str(spec_path),
+            "--controller-workspace",
+            str(controller_workspace),
+            "--skip-backend-env-check",
+        ],
+    )
+    layout = agent_layout(controller_workspace, "agent_one")
+    (layout.workspace_dir / "file.txt").write_text("original", encoding="utf-8")
+    snapshot = runner.invoke(
+        app,
+        [
+            "create-snapshot",
+            "--agent",
+            "agent_one",
+            "--controller-workspace",
+            str(controller_workspace),
+            "--json",
+        ],
+    )
+    assert snapshot.exit_code == 0, snapshot.stdout
+    descriptor = json.loads(snapshot.stdout)
+    descriptor_path = Path(descriptor["descriptor_path"])
+    (descriptor_path.parent / "workspace" / "file.txt").write_text("tampered", encoding="utf-8")
+
+    restored = runner.invoke(
+        app,
+        [
+            "restore-snapshot",
+            "--snapshot",
+            str(descriptor_path),
+            "--controller-workspace",
+            str(controller_workspace),
+            "--restored-agent",
+            "agent_restored",
+            "--json",
+        ],
+    )
+
+    assert restored.exit_code == 1
+    assert "Workspace file digest mismatch" in restored.stdout
+
+
 def test_start_agent_replaces_stale_ready_process_metadata(tmp_path: Path, monkeypatch) -> None:
     controller_workspace = tmp_path / "controller"
     layout = agent_layout(controller_workspace, "agent_one")

@@ -134,8 +134,38 @@ The resulting layout is:
 `-- runtime/
     |-- opencode-server.json
     |-- logs/
-    `-- sessions/<session-id>/
+    |-- sessions/<session-id>/
+    `-- snapshots/<snapshot-id>/
 ```
+
+## Adapter-Local Snapshots
+
+The OpenCode adapter exposes local snapshot primitives before controller
+upload/finalization is implemented:
+
+```sh
+uv run lamplighter-opencode create-snapshot \
+  --agent <agent-id> \
+  --controller-workspace "$LAMPLIGHTER_CONTROLLER_WORKSPACE" \
+  --json
+
+uv run lamplighter-opencode restore-snapshot \
+  --snapshot "$LAMPLIGHTER_CONTROLLER_WORKSPACE/agents/<agent-id>/runtime/snapshots/<snapshot-id>/descriptor.json" \
+  --controller-workspace "$LAMPLIGHTER_CONTROLLER_WORKSPACE" \
+  --restored-agent agent_restored \
+  --json
+```
+
+`create-snapshot` captures workspace files, agent metadata, backend/server
+metadata, optional session metadata, digests, consistency metadata, side-effect
+watermarks, and an inspection-only restoration recipe. It stores the descriptor
+and manifest under the agent runtime `snapshots/` directory.
+
+`restore-snapshot` verifies descriptor, manifest, component, and workspace-file
+digests before reconstructing a new inspection-only agent workspace. It does not
+resume OpenCode provider sessions or advance workflow checkpoints; controller
+upload receipts, resumable restore, and checkpoint promotion belong to later
+snapshot/checkpoint slices.
 
 ## Test
 
