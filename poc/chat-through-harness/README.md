@@ -61,7 +61,7 @@ submits turns, and reports results/events back.
 
 ```sh
 cd ../lamplighter-controller
-Runner__HarnessRepoRoot=../lamplighter-opencode \
+Runner__Adapter__WorkingDirectory=../lamplighter-opencode \
 TRADECRAFT_CONTRACTS_ROOT=../tradecraft-contracts \
 dotnet run --project src/Lamplighter.Controller
 ```

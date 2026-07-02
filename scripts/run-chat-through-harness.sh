@@ -195,7 +195,7 @@ run_runner() {
   source_env "$CONTROLLER/src/Lamplighter.Controller/.env"
   export Runner__RunnerId="${Runner__RunnerId:-runner_local}"
   export Runner__OrchestratorBaseUri="${Runner__OrchestratorBaseUri:-http://127.0.0.1:5087}"
-  export Runner__HarnessRepoRoot="${Runner__HarnessRepoRoot:-$ROOT}"
+  export Runner__Adapter__WorkingDirectory="${Runner__Adapter__WorkingDirectory:-$ROOT}"
   export LAMPLIGHTER_CONTROLLER_WORKSPACE="${LAMPLIGHTER_CONTROLLER_WORKSPACE:-$(controller_workspace)}"
   export TRADECRAFT_CONTRACTS_ROOT="${TRADECRAFT_CONTRACTS_ROOT:-$CONTRACTS}"
   export LAMPLIGHTER_OPENCODE_CONFIG_MODE="${LAMPLIGHTER_OPENCODE_CONFIG_MODE:-inherit-global}"
