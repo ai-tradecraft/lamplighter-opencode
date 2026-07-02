@@ -104,13 +104,20 @@ public sealed class RunnerCommandEndpointTests(
         var startRuntime = Assert.Single(
             commands,
             command => command.CommandType == ControllerCommandTypes.StartAgentRuntime);
+        var claimedStartRuntime = await AcknowledgeCommandAsync(
+            client,
+            controllerId,
+            startRuntime);
+        var startRuntimeLease = Assert.IsType<CommandLease>(
+            claimedStartRuntime.Execution.Lease);
         await PostEventAsync(
             client,
             Event(
                 controllerId,
                 ControllerEventTypes.AgentRuntimeReady,
                 runtimeId: agent.Id,
-                commandId: startRuntime.CommandId));
+                commandId: startRuntime.CommandId,
+                fencingToken: startRuntimeLease.FencingToken));
         var sessionResponse = await client.PostAsJsonAsync(
             $"/api/agents/{agent.Id}/sessions",
             new CreateAgentSessionRequest(Goal: "native v1"));
@@ -287,6 +294,38 @@ public sealed class RunnerCommandEndpointTests(
     }
 
     [Fact]
+    public async Task ControllerEvent_WhenFencingTokenIsStale_ThenReturnsConflict()
+    {
+        // Arrange
+        using var client = factory.CreateClient();
+        const string controllerId = "controller_stale_event";
+        await PostHeartbeatAsync(client, controllerId);
+        var agentResponse = await client.PostAsJsonAsync(
+            $"/api/agent-controllers/{controllerId}/agents",
+            new CreateAgentRequest());
+        agentResponse.EnsureSuccessStatusCode();
+        var command = Assert.Single(
+            await PollCommandsAsync(client, controllerId),
+            candidate =>
+                candidate.CommandType == ControllerCommandTypes.StartAgentRuntime);
+        await AcknowledgeCommandAsync(client, controllerId, command);
+
+        // Act
+        using var response = await client.PostAsJsonAsync(
+            $"/api/v1/controllers/{controllerId}/events",
+            Event(
+                controllerId,
+                ControllerEventTypes.AgentRuntimeReady,
+                runtimeId: command.Target.RuntimeId,
+                commandId: command.CommandId,
+                fencingToken: 0),
+            ControllerProtocolJson.Options);
+
+        // Assert
+        Assert.Equal(System.Net.HttpStatusCode.Conflict, response.StatusCode);
+    }
+
+    [Fact]
     public async Task SubmitTurn_WhenOutcomeEventArrives_ThenProjectsResult()
     {
         // Arrange
@@ -306,6 +345,12 @@ public sealed class RunnerCommandEndpointTests(
             command =>
                 command.CommandType == ControllerCommandTypes.StartInvocation
                 && command.Target.InvocationId == turn.Id);
+        var claimedInvocation = await AcknowledgeCommandAsync(
+            client,
+            controllerId,
+            invocation);
+        var invocationLease = Assert.IsType<CommandLease>(
+            claimedInvocation.Execution.Lease);
         var result = new AgentTurnResult(
             "result_1",
             session.Id,
@@ -332,6 +377,7 @@ public sealed class RunnerCommandEndpointTests(
                 sessionId: session.Id,
                 invocationId: turn.Id,
                 commandId: invocation.CommandId,
+                fencingToken: invocationLease.FencingToken,
                 payloadRef: resultRef));
         var refreshed = await client.GetFromJsonAsync<AgentTurnRecord>(
             $"/api/agent-sessions/{session.Id}/turns/{turn.Id}",
@@ -359,6 +405,8 @@ public sealed class RunnerCommandEndpointTests(
             command =>
                 command.CommandType
                 == ControllerCommandTypes.SynchronizeSessionHistory);
+        var claimedSync = await AcknowledgeCommandAsync(client, controllerId, sync);
+        var syncLease = Assert.IsType<CommandLease>(claimedSync.Execution.Lease);
         var observedAt = DateTimeOffset.UtcNow;
         var history = new AgentChatHistory(
             session.AgentId!,
@@ -393,6 +441,7 @@ public sealed class RunnerCommandEndpointTests(
                 runtimeId: session.AgentId,
                 sessionId: session.Id,
                 commandId: sync.CommandId,
+                fencingToken: syncLease.FencingToken,
                 payloadRef: historyRef));
         var turns = await client.GetFromJsonAsync<
             IReadOnlyCollection<AgentTurnRecord>>(
@@ -487,6 +536,38 @@ public sealed class RunnerCommandEndpointTests(
             $"/api/v1/controllers/{controllerId}/commands?wait=0",
             ControllerProtocolJson.Options);
         return commands ?? [];
+    }
+
+    private static async Task<ControllerCommand> AcknowledgeCommandAsync(
+        HttpClient client,
+        string controllerId,
+        ControllerCommand command)
+    {
+        var acknowledgement = new ControllerCommandAcknowledgement(
+            ControllerMessageTypes.CommandAcknowledgement,
+            ControllerProtocolVersions.Protocol,
+            ControllerProtocolVersions.Schema,
+            Ids.New("ack"),
+            command.CommandId,
+            controllerId,
+            CommandAcknowledgementStatuses.Accepted,
+            DateTimeOffset.UtcNow,
+            command.Correlation);
+        using var response = await client.PostAsJsonAsync(
+            $"/api/v1/controllers/{controllerId}/commands/{command.CommandId}" +
+            "/acknowledgements",
+            acknowledgement,
+            ControllerProtocolJson.Options);
+        response.EnsureSuccessStatusCode();
+        var accepted = Assert.IsType<ControllerCommandAcknowledgement>(
+            await response.Content.ReadFromJsonAsync<
+                ControllerCommandAcknowledgement>(
+                ControllerProtocolJson.Options));
+        return command with
+        {
+            Target = command.Target with { ControllerId = accepted.ControllerId },
+            Execution = command.Execution with { Lease = accepted.Lease }
+        };
     }
 
     private static async Task PostHeartbeatAsync(
@@ -588,6 +669,7 @@ public sealed class RunnerCommandEndpointTests(
         string? sessionId = null,
         string? invocationId = null,
         string? commandId = null,
+        long? fencingToken = null,
         ContentReference? payloadRef = null)
     {
         var aggregate = invocationId is not null
@@ -616,6 +698,7 @@ public sealed class RunnerCommandEndpointTests(
                 CausationId: commandId,
                 CorrelationId: invocationId ?? sessionId ?? runtimeId,
                 InvocationId: invocationId),
+            FencingToken: fencingToken,
             PayloadRef: payloadRef,
             Payload: payloadRef is null
                 ? JsonSerializer.SerializeToElement(new { })

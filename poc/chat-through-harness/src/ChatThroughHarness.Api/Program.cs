@@ -165,7 +165,16 @@ app.MapPost("/api/v1/controllers/{controllerId}/events", async (
         return Results.BadRequest(new { message = "Route and event controller identifiers must match." });
     }
 
-    await runnerStore.AddEventAsync(controllerEvent, cancellationToken);
+    var result = await runnerStore.AddEventAsync(controllerEvent, cancellationToken);
+    if (result.Status != ControllerEventMutationStatus.Ok)
+    {
+        return result.Status switch
+        {
+            ControllerEventMutationStatus.NotFound => Results.NotFound(),
+            _ => Results.Conflict(new { message = result.Message })
+        };
+    }
+
     await ApplyControllerEventAsync(
         controllerEvent,
         runnerStore,
@@ -1605,10 +1614,28 @@ public sealed class RunnerControlStore
         }
     }
 
-    public async Task AddEventAsync(
+    public async Task<ControllerEventMutationResult> AddEventAsync(
         ControllerEvent controllerEvent,
         CancellationToken cancellationToken)
     {
+        if (controllerEvent.Correlation.CommandId is not null)
+        {
+            if (!_commands.TryGetValue(controllerEvent.Correlation.CommandId, out var command))
+            {
+                return ControllerEventMutationResult.NotFound();
+            }
+
+            var lease = command.Execution.Lease;
+            if (lease is null
+                || lease.ControllerId != controllerEvent.ControllerId
+                || controllerEvent.FencingToken is null
+                || lease.FencingToken != controllerEvent.FencingToken)
+            {
+                return ControllerEventMutationResult.Conflict(
+                    "Command lease does not match controller event.");
+            }
+        }
+
         _events.Add(controllerEvent);
         var path = ControllerEventsPath();
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
@@ -1616,6 +1643,7 @@ public sealed class RunnerControlStore
             path,
             JsonSerializer.Serialize(controllerEvent, JsonLineOptions) + Environment.NewLine,
             cancellationToken);
+        return ControllerEventMutationResult.Ok();
     }
 
     public Task<IReadOnlyCollection<ControllerEvent>> GetEventsAsync(
@@ -2110,6 +2138,27 @@ public enum ControllerCommandMutationStatus
     Ok,
     NotFound,
     Conflict
+}
+
+public enum ControllerEventMutationStatus
+{
+    Ok,
+    NotFound,
+    Conflict
+}
+
+public sealed record ControllerEventMutationResult(
+    ControllerEventMutationStatus Status,
+    string? Message)
+{
+    public static ControllerEventMutationResult Ok() =>
+        new(ControllerEventMutationStatus.Ok, null);
+
+    public static ControllerEventMutationResult NotFound() =>
+        new(ControllerEventMutationStatus.NotFound, null);
+
+    public static ControllerEventMutationResult Conflict(string message) =>
+        new(ControllerEventMutationStatus.Conflict, message);
 }
 
 public sealed record ControllerCommandMutationResult(

@@ -427,13 +427,59 @@ public sealed class RunnerControlStoreTests
         var controllerEvent = Event();
 
         // Act
-        await store.AddEventAsync(controllerEvent, CancellationToken.None);
+        var result = await store.AddEventAsync(controllerEvent, CancellationToken.None);
         var events = await store.GetEventsAsync(CancellationToken.None);
 
         // Assert
+        Assert.Equal(ControllerEventMutationStatus.Ok, result.Status);
         Assert.Equal(
             ControllerEventTypes.AgentSessionCreated,
             Assert.Single(events).EventType);
+    }
+
+    [Fact]
+    public async Task AddEventAsync_WhenEventFencingTokenMatches_ThenPersistsEvent()
+    {
+        // Arrange
+        var store = new RunnerControlStore(NewRuntimeRoot());
+        var command = Command();
+        await store.EnqueueCommandAsync(command, CancellationToken.None);
+        var acknowledged = await store.AcknowledgeCommandAsync(
+            Acknowledgement(command),
+            CancellationToken.None);
+        var claimed = Assert.IsType<ControllerCommand>(acknowledged.Command);
+        var lease = Assert.IsType<CommandLease>(claimed.Execution.Lease);
+
+        // Act
+        var result = await store.AddEventAsync(
+            Event(command.CommandId, lease.FencingToken),
+            CancellationToken.None);
+        var events = await store.GetEventsAsync(CancellationToken.None);
+
+        // Assert
+        Assert.Equal(ControllerEventMutationStatus.Ok, result.Status);
+        Assert.Single(events);
+    }
+
+    [Fact]
+    public async Task AddEventAsync_WhenEventFencingTokenIsStale_ThenConflicts()
+    {
+        // Arrange
+        var store = new RunnerControlStore(NewRuntimeRoot());
+        var command = Command();
+        await store.EnqueueCommandAsync(command, CancellationToken.None);
+        await store.AcknowledgeCommandAsync(
+            Acknowledgement(command),
+            CancellationToken.None);
+
+        // Act
+        var result = await store.AddEventAsync(
+            Event(command.CommandId, fencingToken: 0),
+            CancellationToken.None);
+
+        // Assert
+        Assert.Equal(ControllerEventMutationStatus.Conflict, result.Status);
+        Assert.Empty(await store.GetEventsAsync(CancellationToken.None));
     }
 
     [Fact]
@@ -660,7 +706,7 @@ public sealed class RunnerControlStoreTests
             command.Correlation);
     }
 
-    private static ControllerEvent Event()
+    private static ControllerEvent Event(string? commandId = null, long? fencingToken = null)
     {
         return new ControllerEvent(
             ControllerMessageTypes.Event,
@@ -678,8 +724,9 @@ public sealed class RunnerControlStoreTests
                 RuntimeId: "runtime_1",
                 AgentSessionId: "session_1"),
             new ProtocolCorrelation(
-                CommandId: "cmd_1",
+                CommandId: commandId,
                 CorrelationId: "corr_1"),
+            FencingToken: fencingToken,
             Payload: JsonSerializer.SerializeToElement(new { }));
     }
 

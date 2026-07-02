@@ -367,6 +367,7 @@ public sealed record ControllerCommandCompletion(
 /// <param name="PayloadSchemaVersion">The payload schema version.</param>
 /// <param name="Target">The related resources.</param>
 /// <param name="Correlation">The workflow and trace correlation.</param>
+/// <param name="FencingToken">The optional command fencing token for command-caused events.</param>
 /// <param name="PayloadRef">The optional claim-check payload.</param>
 /// <param name="Payload">The optional inline payload.</param>
 /// <param name="RawEventRef">The optional restricted provider event.</param>
@@ -384,6 +385,7 @@ public sealed record ControllerEvent(
     [property: JsonPropertyName("payload_schema_version")] string PayloadSchemaVersion,
     [property: JsonPropertyName("target")] ResourceTarget Target,
     [property: JsonPropertyName("correlation")] ProtocolCorrelation Correlation,
+    [property: JsonPropertyName("fencing_token")] long? FencingToken = null,
     [property: JsonPropertyName("payload_ref")] ContentReference? PayloadRef = null,
     [property: JsonPropertyName("payload")] JsonElement? Payload = null,
     [property: JsonPropertyName("raw_event_ref")] ContentReference? RawEventRef = null,

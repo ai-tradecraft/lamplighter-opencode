@@ -451,6 +451,7 @@ public sealed class CliRunnerCommandHandler(
                     CommandId = command.CommandId,
                     CausationId = command.CommandId
                 },
+                FencingToken: command.Execution.Lease?.FencingToken,
                 PayloadRef: payloadRef,
                 Payload: payloadRef is null
                     ? JsonSerializer.SerializeToElement(new { })
