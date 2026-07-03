@@ -81,6 +81,108 @@ def test_prepare_start_and_stop_agent(tmp_path: Path, monkeypatch) -> None:
     assert metadata["status"] == "stopped"
 
 
+def test_adapter_operation_starts_runtime_from_shared_envelope(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("CHAT_THROUGH_HARNESS_LOG_ROOT", raising=False)
+    controller_workspace = tmp_path / "controller"
+    operation_path = tmp_path / "operation.json"
+    operation_path.write_text(
+        json.dumps(
+            _adapter_operation("StartRuntime", {"runtime_id": "agent_one"}, _agent_spec(), controller_workspace)
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_start_agent(layout, **kwargs):  # noqa: ANN001, ANN202, ARG001
+        return {
+            "status": "planned",
+            "endpoint": "http://127.0.0.1:4097",
+            "workspace": str(layout.workspace_dir),
+        }
+
+    monkeypatch.setattr("lamplighter_opencode.cli.start_agent", fake_start_agent)
+
+    result = runner.invoke(app, ["adapter-operation", "--operation", str(operation_path), "--json"])
+
+    assert result.exit_code == 0, result.stdout
+    envelope = json.loads(result.stdout)
+    assert envelope["message_type"] == "adapter.operation_result"
+    assert envelope["status"] == "completed"
+    payload = envelope["extensions"]["tradecraft.dev/payload"]
+    assert payload["agent_id"] == "agent_one"
+    assert payload["status"] == "planned"
+    assert agent_layout(controller_workspace, "agent_one").metadata_path.is_file()
+
+
+def test_adapter_operation_submits_turn_from_shared_envelope(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("LAMPLIGHTER_OPENCODE_USE_REAL_BACKEND", raising=False)
+    controller_workspace = tmp_path / "controller"
+    spec_path = tmp_path / "agent-spec.json"
+    spec_path.write_text(json.dumps(_agent_spec()), encoding="utf-8")
+    assert (
+        runner.invoke(
+            app,
+            [
+                "prepare-agent",
+                "--spec",
+                str(spec_path),
+                "--controller-workspace",
+                str(controller_workspace),
+                "--skip-backend-env-check",
+                "--json",
+            ],
+        ).exit_code
+        == 0
+    )
+    assert (
+        runner.invoke(
+            app,
+            [
+                "start-agent",
+                "--agent",
+                "agent_one",
+                "--controller-workspace",
+                str(controller_workspace),
+                "--dry-run",
+                "--json",
+            ],
+        ).exit_code
+        == 0
+    )
+    create_agent_session(AgentChatSessionSpec.from_dict(_session_spec("session_one")), controller_workspace)
+    operation_path = tmp_path / "operation.json"
+    operation_path.write_text(
+        json.dumps(
+            _adapter_operation(
+                "StartInvocation",
+                {
+                    "runtime_id": "agent_one",
+                    "agent_session_id": "session_one",
+                    "invocation_id": "turn_one",
+                },
+                {
+                    "id": "turn_one",
+                    "agent_session_id": "session_one",
+                    "agent_id": "agent_one",
+                    "session_id": "session_one",
+                    "type": "prompt_response",
+                    "instruction": "hello",
+                },
+                controller_workspace,
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["adapter-operation", "--operation", str(operation_path), "--json"])
+
+    assert result.exit_code == 0, result.stdout
+    envelope = json.loads(result.stdout)
+    assert envelope["message_type"] == "adapter.operation_result"
+    assert envelope["status"] == "completed"
+    assert envelope["extensions"]["tradecraft.dev/payload"]["status"] == "completed"
+    assert "Fake OpenCode response" in envelope["extensions"]["tradecraft.dev/payload"]["message"]
+
+
 def test_stop_agent_cancels_nonterminal_child_sessions(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("LAMPLIGHTER_OPENCODE_USE_REAL_BACKEND", raising=False)
     controller_workspace = tmp_path / "controller"
@@ -511,4 +613,33 @@ def _session_spec(session_id: str) -> dict[str, object]:
         "artifact_contract": {},
         "timeout_policy": {},
         "telemetry": {},
+    }
+
+
+def _adapter_operation(
+    operation_type: str,
+    target: dict[str, object],
+    payload: dict[str, object],
+    controller_workspace: Path,
+) -> dict[str, object]:
+    return {
+        "message_type": "adapter.operation",
+        "protocol_version": "1.0",
+        "schema_version": "1.0",
+        "operation_id": "cmd_one",
+        "operation_type": operation_type,
+        "idempotency_key": "idempotency_one",
+        "target": {"controller_id": "controller_one", **target},
+        "deadline": "2026-07-02T00:00:00Z",
+        "fencing_token": 1,
+        "correlation": {"command_id": "cmd_one"},
+        "authorization_context": {
+            "subject_ref": "system://tests",
+            "grant_ref": "authorization-grant://tests/1",
+            "issued_at": "2026-07-02T00:00:00Z",
+        },
+        "extensions": {
+            "tradecraft.dev/controller_workspace": str(controller_workspace),
+            "tradecraft.dev/payload": payload,
+        },
     }

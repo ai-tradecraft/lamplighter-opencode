@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any, cast
 
 import typer
 from rich.console import Console
@@ -56,6 +57,10 @@ LegacySpecOption = Annotated[
 JsonOutputOption = Annotated[
     bool,
     typer.Option("--json", help="Emit machine-readable JSON output."),
+]
+AdapterOperationOption = Annotated[
+    Path,
+    typer.Option("--operation", exists=True, readable=True, dir_okay=False, help="Adapter operation envelope JSON."),
 ]
 SkipBackendEnvCheckOption = Annotated[
     bool,
@@ -418,6 +423,217 @@ def stream_events(
         return
 
     console.print(f"Wrote {len(events)} normalized OpenCode events")
+
+
+@app.command("adapter-operation")
+def adapter_operation(
+    operation: AdapterOperationOption,
+    json_output: JsonOutputOption = False,
+) -> None:
+    """Execute one provider-neutral Agent Runtime Adapter operation envelope."""
+    try:
+        operation_value = _read_json_object(operation)
+    except (ContractValidationError, OSError, json.JSONDecodeError) as exc:
+        console.print(f"[red]Failed to read adapter operation:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    try:
+        payload, content_type = _execute_adapter_operation(operation_value)
+        result = _adapter_operation_result(operation_value, payload, content_type)
+    except (ContractValidationError, OSError, RuntimeError, ValueError, json.JSONDecodeError, KeyError) as exc:
+        result = _adapter_operation_failure(operation_value, exc)
+
+    if json_output:
+        typer.echo(json.dumps(result, indent=2))
+        return
+
+    if result["status"] == "completed":
+        console.print(f"Completed adapter operation {operation_value.get('operation_id')}")
+    else:
+        error = result.get("error", {})
+        error_summary = error.get("summary") if isinstance(error, dict) else None
+        console.print(f"[red]Adapter operation failed:[/red] {error_summary or 'unknown failure'}")
+
+
+def _execute_adapter_operation(operation: dict[str, object]) -> tuple[dict[str, Any], str]:
+    operation_type = _operation_string(operation, "operation_type")
+    target = _operation_object(operation, "target")
+    extensions = _operation_object(operation, "extensions")
+    controller_workspace = Path(_extension_string(extensions, "tradecraft.dev/controller_workspace"))
+
+    if operation_type == "StartRuntime":
+        payload = _operation_payload(extensions)
+        validate_contract("agent_spec.schema.json", payload)
+        agent_spec = AgentSpec.from_dict(payload)
+        layout = materialize_agent(agent_spec, controller_workspace)
+        metadata = start_agent(layout)
+        return (
+            {
+                "agent_id": agent_spec.agent_id,
+                "status": metadata.get("status") or "ready",
+                "workspace_path": str(layout.workspace_dir),
+                "runtime_path": str(layout.runtime_dir),
+                **metadata,
+            },
+            "application/vnd.tradecraft.start-agent-result+json",
+        )
+
+    if operation_type == "StopRuntime":
+        metadata = stop_agent(agent_layout(controller_workspace, _target_string(target, "runtime_id")))
+        return (
+            {
+                "agent_id": _target_string(target, "runtime_id"),
+                **metadata,
+            },
+            "application/vnd.tradecraft.stop-agent-result+json",
+        )
+
+    if operation_type == "CreateSession":
+        payload = _operation_payload(extensions)
+        validate_contract("agent_chat_session_spec.schema.json", payload)
+        session_spec = AgentChatSessionSpec.from_dict(payload)
+        if session_spec.agent_id != _target_string(target, "runtime_id"):
+            raise ValueError("Session spec agent_id must match target runtime_id.")
+        layout = create_agent_session(session_spec, controller_workspace)
+        return (_read_json_object(layout.metadata_path), "application/vnd.tradecraft.create-session-result+json")
+
+    if operation_type == "StartInvocation":
+        payload = _operation_payload(extensions)
+        validate_contract("agent_turn_request.schema.json", payload)
+        turn_request = AgentTurnRequest.from_dict(payload)
+        session_id = _target_string(target, "agent_session_id")
+        if turn_request.agent_session_id != session_id:
+            raise ValueError("Turn request agent_session_id must match target agent_session_id.")
+        result = submit_agent_session_turn(
+            turn_request,
+            controller_workspace,
+            _target_string(target, "runtime_id"),
+            session_id,
+        )
+        return (result.to_dict(), "application/vnd.tradecraft.agent-turn-result+json")
+
+    if operation_type == "CloseSession":
+        return (
+            cancel_agent_session(
+                controller_workspace,
+                _target_string(target, "runtime_id"),
+                _target_string(target, "agent_session_id"),
+            ),
+            "application/vnd.tradecraft.cancel-session-result+json",
+        )
+
+    if operation_type == "ReadTranscript":
+        history = get_agent_session_history(
+            controller_workspace,
+            _target_string(target, "runtime_id"),
+            _target_string(target, "agent_session_id"),
+        )
+        payload = history.to_dict()
+        validate_contract("agent_chat_history.schema.json", payload)
+        return (payload, "application/vnd.tradecraft.agent-chat-history+json")
+
+    raise ValueError(f"Unsupported adapter operation: {operation_type}")
+
+
+def _adapter_operation_result(
+    operation: dict[str, object],
+    payload: dict[str, Any],
+    content_type: str,
+) -> dict[str, object]:
+    return {
+        "message_type": "adapter.operation_result",
+        "protocol_version": _operation_string(operation, "protocol_version"),
+        "schema_version": _operation_string(operation, "schema_version"),
+        "result_id": f"result_{_operation_string(operation, 'operation_id')}",
+        "operation_id": _operation_string(operation, "operation_id"),
+        "status": "completed",
+        "completed_at": _utc_now(),
+        "fencing_token": _operation_int(operation, "fencing_token"),
+        "correlation": _operation_object(operation, "correlation"),
+        "extensions": {
+            "tradecraft.dev/payload": payload,
+            "tradecraft.dev/payload_content_type": content_type,
+        },
+    }
+
+
+def _adapter_operation_failure(operation: dict[str, object], exc: Exception) -> dict[str, object]:
+    try:
+        protocol_version = _operation_string(operation, "protocol_version")
+        schema_version = _operation_string(operation, "schema_version")
+        operation_id = _operation_string(operation, "operation_id")
+        fencing_token = _operation_int(operation, "fencing_token")
+        correlation = _operation_object(operation, "correlation")
+    except (ContractValidationError, KeyError, TypeError, ValueError):
+        protocol_version = "1.0"
+        schema_version = "1.0"
+        operation_id = "unknown_operation"
+        fencing_token = 1
+        correlation = {"command_id": "unknown_command"}
+
+    return {
+        "message_type": "adapter.operation_result",
+        "protocol_version": protocol_version,
+        "schema_version": schema_version,
+        "result_id": f"result_{operation_id}",
+        "operation_id": operation_id,
+        "status": "failed",
+        "completed_at": _utc_now(),
+        "fencing_token": fencing_token,
+        "correlation": correlation,
+        "error": {
+            "code": "adapter_operation_failed",
+            "classification": "internal_adapter_error",
+            "summary": str(exc),
+            "retryable": False,
+        },
+    }
+
+
+def _operation_payload(extensions: dict[str, object]) -> dict[str, Any]:
+    payload = extensions.get("tradecraft.dev/payload")
+    if not isinstance(payload, dict):
+        raise ContractValidationError("Adapter operation extension tradecraft.dev/payload must be a JSON object.")
+    return cast(dict[str, Any], payload)
+
+
+def _operation_string(operation: dict[str, object], key: str) -> str:
+    value = operation[key]
+    if not isinstance(value, str) or not value:
+        raise ContractValidationError(f"Adapter operation {key} must be a non-empty string.")
+    return value
+
+
+def _extension_string(extensions: dict[str, object], key: str) -> str:
+    value = extensions[key]
+    if not isinstance(value, str) or not value:
+        raise ContractValidationError(f"Adapter operation extension {key} must be a non-empty string.")
+    return value
+
+
+def _target_string(target: dict[str, object], key: str) -> str:
+    value = target[key]
+    if not isinstance(value, str) or not value:
+        raise ContractValidationError(f"Adapter operation target {key} must be a non-empty string.")
+    return value
+
+
+def _operation_int(operation: dict[str, object], key: str) -> int:
+    value = operation[key]
+    if not isinstance(value, int) or value < 1:
+        raise ContractValidationError(f"Adapter operation {key} must be a positive integer.")
+    return value
+
+
+def _operation_object(operation: dict[str, object], key: str) -> dict[str, object]:
+    value = operation[key]
+    if not isinstance(value, dict):
+        raise ContractValidationError(f"Adapter operation {key} must be a JSON object.")
+    return cast(dict[str, object], value)
+
+
+def _utc_now() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _read_json_object(path: Path) -> dict[str, object]:

@@ -65,6 +65,18 @@ uv run lamplighter-opencode --help # show help
 uv run python -m lamplighter_opencode  # via __main__.py
 ```
 
+The Lamplighter Controller calls this package through the provider-neutral
+adapter command:
+
+```sh
+uv run lamplighter-opencode adapter-operation --operation operation.json --json
+```
+
+`operation.json` is an `adapter.operation` envelope from
+`tradecraft-contracts/contracts/agent-runtime/v1/schemas/runtime-adapter-message.schema.json`.
+The command returns an `adapter.operation_result` envelope; OpenCode-specific
+work remains an implementation detail behind that boundary.
+
 ## Project layout
 
 ```
