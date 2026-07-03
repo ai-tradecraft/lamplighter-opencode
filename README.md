@@ -70,17 +70,22 @@ adapter command:
 
 ```sh
 uv run lamplighter-opencode adapter-operation --operation operation.json --json
-uv run lamplighter-opencode observe-runtimes --controller-workspace .agent-runtime --json
 ```
 
 `operation.json` is an `adapter.operation` envelope from
 `tradecraft-contracts/contracts/agent-runtime/v1/schemas/runtime-adapter-message.schema.json`.
 The command validates the incoming envelope against the shared Agent Runtime
-schema, reads top-level `payload` or local `payload_ref` content, and returns an
+schema, reads top-level `payload` content, and returns an
 `adapter.operation_result` envelope with a first-class local `result_ref`.
-OpenCode-specific work remains an implementation detail behind that boundary.
-`observe-runtimes` is the adapter-owned observation surface used by controller
-heartbeats; it owns OpenCode runtime-file parsing and OpenCode health probing.
+`InspectRuntime` uses this same operation path for controller heartbeat
+inventory. OpenCode-specific work remains an implementation detail behind that
+boundary.
+
+For local debugging, the adapter also exposes a direct observation convenience:
+
+```sh
+uv run lamplighter-opencode observe-runtimes --controller-workspace .agent-runtime --json
+```
 
 ## Project layout
 

@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 from typer.testing import CliRunner
 
 import lamplighter_opencode.runtime.inventory as inventory_module
 from lamplighter_opencode.cli import app
+from lamplighter_opencode.contracts.validation import validate_agent_runtime_contract
 
 runner = CliRunner()
 
@@ -68,3 +70,46 @@ def test_observe_runtimes_command_emits_json_inventory(tmp_path: Path) -> None:
     payload = json.loads(result.stdout)
     assert payload["adapter_kind"] == "opencode"
     assert payload["runtimes"] == []
+
+
+def test_adapter_operation_inspects_runtime_inventory(tmp_path: Path) -> None:
+    controller_workspace = tmp_path / "controller"
+    (controller_workspace / "agents").mkdir(parents=True)
+    operation_path = tmp_path / "operation.json"
+    operation = {
+        "message_type": "adapter.operation",
+        "protocol_version": "1.0",
+        "schema_version": "1.0",
+        "operation_id": "cmd_inspect",
+        "operation_type": "InspectRuntime",
+        "idempotency_key": "inspect_one",
+        "target": {"controller_id": "controller_one"},
+        "deadline": "2026-07-02T00:00:00Z",
+        "fencing_token": 1,
+        "correlation": {"command_id": "cmd_inspect"},
+        "authorization_context": {
+            "subject_ref": "system://tests",
+            "grant_ref": "authorization-grant://tests/1",
+            "issued_at": "2026-07-02T00:00:00Z",
+        },
+        "extensions": {
+            "tradecraft.dev/controller_workspace": str(controller_workspace),
+        },
+    }
+    validate_agent_runtime_contract("runtime-adapter-message.schema.json", operation)
+    operation_path.write_text(json.dumps(operation), encoding="utf-8")
+
+    result = runner.invoke(app, ["adapter-operation", "--operation", str(operation_path), "--json"])
+
+    assert result.exit_code == 0, result.stdout
+    envelope = json.loads(result.stdout)
+    validate_agent_runtime_contract("runtime-adapter-message.schema.json", envelope)
+    assert envelope["message_type"] == "adapter.operation_result"
+    result_ref = envelope["result_ref"]
+    assert isinstance(result_ref, dict)
+    uri = result_ref["uri"]
+    assert isinstance(uri, str)
+    parsed = urlparse(uri)
+    assert parsed.scheme == "file"
+    inventory = json.loads(Path(unquote(parsed.path)).read_text(encoding="utf-8"))
+    assert inventory["adapter_kind"] == "opencode"

@@ -484,6 +484,9 @@ def _execute_adapter_operation(operation: dict[str, object]) -> tuple[dict[str, 
     extensions = _operation_object(operation, "extensions")
     controller_workspace = Path(_extension_string(extensions, "tradecraft.dev/controller_workspace"))
 
+    if operation_type == "InspectRuntime":
+        return (observe_runtime_inventory(controller_workspace), "application/vnd.tradecraft.runtime-inventory+json")
+
     if operation_type == "StartRuntime":
         payload = _adapter_operation_payload(operation)
         validate_contract("agent_spec.schema.json", payload)
@@ -521,7 +524,7 @@ def _execute_adapter_operation(operation: dict[str, object]) -> tuple[dict[str, 
         return (_read_json_object(layout.metadata_path), "application/vnd.tradecraft.create-session-result+json")
 
     if operation_type == "StartInvocation":
-        payload = _adapter_operation_payload(operation)
+        payload = _agent_turn_request_payload(operation)
         validate_contract("agent_turn_request.schema.json", payload)
         turn_request = AgentTurnRequest.from_dict(payload)
         session_id = _target_string(target, "agent_session_id")
@@ -630,6 +633,28 @@ def _adapter_operation_payload(operation: dict[str, object]) -> dict[str, Any]:
             return cast(dict[str, Any], payload_value)
 
     raise ContractValidationError("Adapter operation payload must be a JSON object or file payload_ref.")
+
+
+def _agent_turn_request_payload(operation: dict[str, object]) -> dict[str, Any]:
+    payload = _adapter_operation_payload(operation)
+    if payload.get("document_type") != "invocation_input":
+        return payload
+    extensions = payload.get("extensions")
+    if not isinstance(extensions, dict):
+        raise ContractValidationError("invocation_input extensions must contain the legacy turn request reference.")
+    legacy_ref = extensions.get("tradecraft.dev/legacy_turn_request_ref")
+    if not isinstance(legacy_ref, dict):
+        raise ContractValidationError("invocation_input must include tradecraft.dev/legacy_turn_request_ref.")
+    uri = legacy_ref.get("uri")
+    if not isinstance(uri, str):
+        raise ContractValidationError("legacy turn request ref uri must be a string.")
+    parsed = urlparse(uri)
+    if parsed.scheme != "file":
+        raise ContractValidationError("legacy turn request ref currently supports only file:// URIs.")
+    legacy_payload = json.loads(Path(unquote(parsed.path)).read_text(encoding="utf-8"))
+    if not isinstance(legacy_payload, dict):
+        raise ContractValidationError("legacy turn request payload must be a JSON object.")
+    return cast(dict[str, Any], legacy_payload)
 
 
 def _write_adapter_operation_result_payload(

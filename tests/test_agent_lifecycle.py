@@ -653,14 +653,34 @@ def _adapter_operation(
     }
     if operation_type == "StartInvocation":
         payload_bytes = json.dumps(payload).encode()
-        payload_path = controller_workspace / "commands" / "cmd_one" / "adapter-payload.json"
+        payload_path = controller_workspace / "commands" / "cmd_one" / "legacy-turn-request.json"
         payload_path.parent.mkdir(parents=True, exist_ok=True)
         payload_path.write_bytes(payload_bytes)
-        operation["payload_ref"] = {
+        legacy_ref = {
             "uri": payload_path.resolve().as_uri(),
             "sha256": hashlib.sha256(payload_bytes).hexdigest(),
             "content_type": "application/json",
             "length": len(payload_bytes),
+        }
+        instruction_bytes = str(payload.get("instruction") or "").encode()
+        instruction_path = controller_workspace / "commands" / "cmd_one" / "instruction.md"
+        instruction_path.write_bytes(instruction_bytes)
+        operation["payload"] = {
+            "document_type": "invocation_input",
+            "invocation_id": target["invocation_id"],
+            "agent_spec_ref": "agent-spec://agent_one",
+            "context_package_ref": "context-package://cmd_one",
+            "instruction_ref": {
+                "uri": instruction_path.resolve().as_uri(),
+                "sha256": hashlib.sha256(instruction_bytes).hexdigest(),
+                "content_type": "text/markdown",
+                "length": len(instruction_bytes),
+            },
+            "completion_contract_ref": "completion-contract://tradecraft/default",
+            "deadline": "2026-07-02T00:00:00Z",
+            "extensions": {
+                "tradecraft.dev/legacy_turn_request_ref": legacy_ref,
+            },
         }
     else:
         operation["payload"] = payload
