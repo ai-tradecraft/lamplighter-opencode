@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any, cast
+from urllib.parse import unquote, urlparse
 
 import typer
 from rich.console import Console
@@ -16,7 +18,12 @@ from lamplighter_opencode.contracts.models import (
     AgentSpec,
     AgentTurnRequest,
 )
-from lamplighter_opencode.contracts.validation import ContractValidationError, validate_contract
+from lamplighter_opencode.contracts.validation import (
+    ContractValidationError,
+    validate_agent_runtime_contract,
+    validate_contract,
+)
+from lamplighter_opencode.runtime.inventory import observe_runtime_inventory
 from lamplighter_opencode.runtime.layout import agent_layout
 from lamplighter_opencode.runtime.workspace import (
     cancel_agent_session,
@@ -425,6 +432,20 @@ def stream_events(
     console.print(f"Wrote {len(events)} normalized OpenCode events")
 
 
+@app.command("observe-runtimes")
+def observe_runtimes(
+    controller_workspace: ControllerWorkspaceOption,
+    json_output: JsonOutputOption = False,
+) -> None:
+    """Observe OpenCode-backed runtime inventory for controller heartbeats."""
+    inventory = observe_runtime_inventory(controller_workspace)
+    if json_output:
+        typer.echo(json.dumps(inventory, indent=2))
+        return
+
+    console.print(f"Observed {len(inventory['runtimes'])} OpenCode runtime(s).")
+
+
 @app.command("adapter-operation")
 def adapter_operation(
     operation: AdapterOperationOption,
@@ -433,15 +454,17 @@ def adapter_operation(
     """Execute one provider-neutral Agent Runtime Adapter operation envelope."""
     try:
         operation_value = _read_json_object(operation)
+        validate_agent_runtime_contract("runtime-adapter-message.schema.json", operation_value)
     except (ContractValidationError, OSError, json.JSONDecodeError) as exc:
         console.print(f"[red]Failed to read adapter operation:[/red] {exc}")
         raise typer.Exit(code=1) from exc
 
     try:
         payload, content_type = _execute_adapter_operation(operation_value)
-        result = _adapter_operation_result(operation_value, payload, content_type)
+        result = _adapter_operation_result(operation_value, operation, payload, content_type)
     except (ContractValidationError, OSError, RuntimeError, ValueError, json.JSONDecodeError, KeyError) as exc:
         result = _adapter_operation_failure(operation_value, exc)
+    validate_agent_runtime_contract("runtime-adapter-message.schema.json", result)
 
     if json_output:
         typer.echo(json.dumps(result, indent=2))
@@ -462,7 +485,7 @@ def _execute_adapter_operation(operation: dict[str, object]) -> tuple[dict[str, 
     controller_workspace = Path(_extension_string(extensions, "tradecraft.dev/controller_workspace"))
 
     if operation_type == "StartRuntime":
-        payload = _operation_payload(extensions)
+        payload = _adapter_operation_payload(operation)
         validate_contract("agent_spec.schema.json", payload)
         agent_spec = AgentSpec.from_dict(payload)
         layout = materialize_agent(agent_spec, controller_workspace)
@@ -489,7 +512,7 @@ def _execute_adapter_operation(operation: dict[str, object]) -> tuple[dict[str, 
         )
 
     if operation_type == "CreateSession":
-        payload = _operation_payload(extensions)
+        payload = _adapter_operation_payload(operation)
         validate_contract("agent_chat_session_spec.schema.json", payload)
         session_spec = AgentChatSessionSpec.from_dict(payload)
         if session_spec.agent_id != _target_string(target, "runtime_id"):
@@ -498,7 +521,7 @@ def _execute_adapter_operation(operation: dict[str, object]) -> tuple[dict[str, 
         return (_read_json_object(layout.metadata_path), "application/vnd.tradecraft.create-session-result+json")
 
     if operation_type == "StartInvocation":
-        payload = _operation_payload(extensions)
+        payload = _adapter_operation_payload(operation)
         validate_contract("agent_turn_request.schema.json", payload)
         turn_request = AgentTurnRequest.from_dict(payload)
         session_id = _target_string(target, "agent_session_id")
@@ -537,9 +560,11 @@ def _execute_adapter_operation(operation: dict[str, object]) -> tuple[dict[str, 
 
 def _adapter_operation_result(
     operation: dict[str, object],
+    operation_path: Path,
     payload: dict[str, Any],
     content_type: str,
 ) -> dict[str, object]:
+    result_ref = _write_adapter_operation_result_payload(operation_path, payload, content_type)
     return {
         "message_type": "adapter.operation_result",
         "protocol_version": _operation_string(operation, "protocol_version"),
@@ -550,10 +575,7 @@ def _adapter_operation_result(
         "completed_at": _utc_now(),
         "fencing_token": _operation_int(operation, "fencing_token"),
         "correlation": _operation_object(operation, "correlation"),
-        "extensions": {
-            "tradecraft.dev/payload": payload,
-            "tradecraft.dev/payload_content_type": content_type,
-        },
+        "result_ref": result_ref,
     }
 
 
@@ -590,11 +612,40 @@ def _adapter_operation_failure(operation: dict[str, object], exc: Exception) -> 
     }
 
 
-def _operation_payload(extensions: dict[str, object]) -> dict[str, Any]:
-    payload = extensions.get("tradecraft.dev/payload")
-    if not isinstance(payload, dict):
-        raise ContractValidationError("Adapter operation extension tradecraft.dev/payload must be a JSON object.")
-    return cast(dict[str, Any], payload)
+def _adapter_operation_payload(operation: dict[str, object]) -> dict[str, Any]:
+    payload = operation.get("payload")
+    if isinstance(payload, dict):
+        return cast(dict[str, Any], payload)
+
+    payload_ref = operation.get("payload_ref")
+    if isinstance(payload_ref, dict):
+        uri = payload_ref.get("uri")
+        if not isinstance(uri, str):
+            raise ContractValidationError("Adapter operation payload_ref.uri must be a string.")
+        parsed = urlparse(uri)
+        if parsed.scheme != "file":
+            raise ContractValidationError("Adapter operation payload_ref currently supports only file:// URIs.")
+        payload_value = json.loads(Path(unquote(parsed.path)).read_text(encoding="utf-8"))
+        if isinstance(payload_value, dict):
+            return cast(dict[str, Any], payload_value)
+
+    raise ContractValidationError("Adapter operation payload must be a JSON object or file payload_ref.")
+
+
+def _write_adapter_operation_result_payload(
+    operation_path: Path,
+    payload: dict[str, Any],
+    content_type: str,
+) -> dict[str, object]:
+    payload_bytes = json.dumps(payload, indent=2).encode("utf-8")
+    payload_path = operation_path.with_name(f"{operation_path.stem}-result-payload.json")
+    payload_path.write_bytes(payload_bytes)
+    return {
+        "uri": payload_path.resolve().as_uri(),
+        "sha256": hashlib.sha256(payload_bytes).hexdigest(),
+        "content_type": content_type,
+        "length": len(payload_bytes),
+    }
 
 
 def _operation_string(operation: dict[str, object], key: str) -> str:

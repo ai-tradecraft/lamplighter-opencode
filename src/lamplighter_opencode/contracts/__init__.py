@@ -12,7 +12,11 @@ from lamplighter_opencode.contracts.models import (
     OpenCodeServerConfig,
     RuntimeEvent,
 )
-from lamplighter_opencode.contracts.validation import ContractValidationError, validate_contract
+from lamplighter_opencode.contracts.validation import (
+    ContractValidationError,
+    validate_agent_runtime_contract,
+    validate_contract,
+)
 
 __all__ = [
     "AgentChatHistory",
@@ -26,5 +30,6 @@ __all__ = [
     "OpenCodeBackendConfig",
     "OpenCodeServerConfig",
     "RuntimeEvent",
+    "validate_agent_runtime_contract",
     "validate_contract",
 ]

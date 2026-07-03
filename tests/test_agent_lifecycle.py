@@ -1,15 +1,19 @@
 """Agent lifecycle command tests."""
 
+import hashlib
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import cast
+from urllib.parse import unquote, urlparse
 
 from typer.testing import CliRunner
 
 import lamplighter_opencode.runtime.workspace as workspace_module
 from lamplighter_opencode.cli import app
 from lamplighter_opencode.contracts.models import AgentChatSessionSpec
+from lamplighter_opencode.contracts.validation import validate_agent_runtime_contract
 from lamplighter_opencode.runtime.layout import agent_layout, agent_session_layout
 from lamplighter_opencode.runtime.workspace import create_agent_session, start_agent
 
@@ -105,9 +109,10 @@ def test_adapter_operation_starts_runtime_from_shared_envelope(tmp_path: Path, m
 
     assert result.exit_code == 0, result.stdout
     envelope = json.loads(result.stdout)
+    validate_agent_runtime_contract("runtime-adapter-message.schema.json", envelope)
     assert envelope["message_type"] == "adapter.operation_result"
     assert envelope["status"] == "completed"
-    payload = envelope["extensions"]["tradecraft.dev/payload"]
+    payload = _read_result_ref_payload(envelope)
     assert payload["agent_id"] == "agent_one"
     assert payload["status"] == "planned"
     assert agent_layout(controller_workspace, "agent_one").metadata_path.is_file()
@@ -177,10 +182,14 @@ def test_adapter_operation_submits_turn_from_shared_envelope(tmp_path: Path, mon
 
     assert result.exit_code == 0, result.stdout
     envelope = json.loads(result.stdout)
+    validate_agent_runtime_contract("runtime-adapter-message.schema.json", envelope)
     assert envelope["message_type"] == "adapter.operation_result"
     assert envelope["status"] == "completed"
-    assert envelope["extensions"]["tradecraft.dev/payload"]["status"] == "completed"
-    assert "Fake OpenCode response" in envelope["extensions"]["tradecraft.dev/payload"]["message"]
+    payload = _read_result_ref_payload(envelope)
+    assert payload["status"] == "completed"
+    message = payload["message"]
+    assert isinstance(message, str)
+    assert "Fake OpenCode response" in message
 
 
 def test_stop_agent_cancels_nonterminal_child_sessions(tmp_path: Path, monkeypatch) -> None:
@@ -622,7 +631,7 @@ def _adapter_operation(
     payload: dict[str, object],
     controller_workspace: Path,
 ) -> dict[str, object]:
-    return {
+    operation = {
         "message_type": "adapter.operation",
         "protocol_version": "1.0",
         "schema_version": "1.0",
@@ -640,6 +649,31 @@ def _adapter_operation(
         },
         "extensions": {
             "tradecraft.dev/controller_workspace": str(controller_workspace),
-            "tradecraft.dev/payload": payload,
         },
     }
+    if operation_type == "StartInvocation":
+        payload_bytes = json.dumps(payload).encode()
+        payload_path = controller_workspace / "commands" / "cmd_one" / "adapter-payload.json"
+        payload_path.parent.mkdir(parents=True, exist_ok=True)
+        payload_path.write_bytes(payload_bytes)
+        operation["payload_ref"] = {
+            "uri": payload_path.resolve().as_uri(),
+            "sha256": hashlib.sha256(payload_bytes).hexdigest(),
+            "content_type": "application/json",
+            "length": len(payload_bytes),
+        }
+    else:
+        operation["payload"] = payload
+    validate_agent_runtime_contract("runtime-adapter-message.schema.json", operation)
+    return operation
+
+
+def _read_result_ref_payload(envelope: dict[str, object]) -> dict[str, object]:
+    result_ref = cast(dict[str, object], envelope["result_ref"])
+    uri = result_ref["uri"]
+    assert isinstance(uri, str)
+    parsed = urlparse(uri)
+    assert parsed.scheme == "file"
+    payload = json.loads(Path(unquote(parsed.path)).read_text(encoding="utf-8"))
+    assert isinstance(payload, dict)
+    return payload
