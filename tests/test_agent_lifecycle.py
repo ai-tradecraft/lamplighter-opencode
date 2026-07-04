@@ -154,6 +154,70 @@ def test_adapter_operation_ReplayedWithSameIdempotencyKey_ThenReturnsStoredResul
     assert start_calls == 1
 
 
+def test_adapter_operation_ReadEvents_ThenReturnsFreshReplayBatch(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("CHAT_THROUGH_HARNESS_LOG_ROOT", raising=False)
+    controller_workspace = tmp_path / "controller"
+
+    def fake_start_agent(layout, **kwargs):  # noqa: ANN001, ANN202, ARG001
+        return {
+            "status": "planned",
+            "endpoint": "http://127.0.0.1:4097",
+            "workspace": str(layout.workspace_dir),
+        }
+
+    monkeypatch.setattr("lamplighter_opencode.cli.start_agent", fake_start_agent)
+    first_start = _adapter_operation(
+        "StartRuntime",
+        {"runtime_id": "agent_one"},
+        _agent_spec("agent_one"),
+        controller_workspace,
+    )
+    first_start_path = tmp_path / "start-agent-one.json"
+    first_start_path.write_text(json.dumps(first_start), encoding="utf-8")
+    started = runner.invoke(app, ["adapter-operation", "--operation", str(first_start_path), "--json"])
+    assert started.exit_code == 0, started.stdout
+
+    read_operation = _adapter_operation(
+        "ReadEvents",
+        {},
+        {"document_type": "adapter_event_replay_request", "from_sequence": 1, "max_events": 10},
+        controller_workspace,
+    )
+    read_operation["operation_id"] = "cmd_read_events"
+    read_operation["idempotency_key"] = "read_events"
+    read_path = tmp_path / "read-events.json"
+    read_path.write_text(json.dumps(read_operation), encoding="utf-8")
+
+    first_read = runner.invoke(app, ["adapter-operation", "--operation", str(read_path), "--json"])
+    assert first_read.exit_code == 0, first_read.stdout
+    first_batch = _read_result_ref_payload(json.loads(first_read.stdout))
+    validate_agent_runtime_contract("runtime-resources.schema.json", first_batch)
+    assert [event["event_type"] for event in cast(list[dict[str, object]], first_batch["events"])] == ["runtime.ready"]
+    assert first_batch["next_sequence"] == 2
+
+    second_start = _adapter_operation(
+        "StartRuntime",
+        {"runtime_id": "agent_two"},
+        _agent_spec("agent_two"),
+        controller_workspace,
+    )
+    second_start["operation_id"] = "cmd_two"
+    second_start["idempotency_key"] = "idempotency_two"
+    second_start_path = tmp_path / "start-agent-two.json"
+    second_start_path.write_text(json.dumps(second_start), encoding="utf-8")
+    started_again = runner.invoke(app, ["adapter-operation", "--operation", str(second_start_path), "--json"])
+    assert started_again.exit_code == 0, started_again.stdout
+
+    second_read = runner.invoke(app, ["adapter-operation", "--operation", str(read_path), "--json"])
+
+    assert second_read.exit_code == 0, second_read.stdout
+    second_batch = _read_result_ref_payload(json.loads(second_read.stdout))
+    validate_agent_runtime_contract("runtime-resources.schema.json", second_batch)
+    events = cast(list[dict[str, object]], second_batch["events"])
+    assert [event["sequence"] for event in events] == [1, 2]
+    assert second_batch["next_sequence"] == 3
+
+
 def test_adapter_operation_ReusedIdempotencyKeyForDifferentOperation_ThenReportsConflict(tmp_path: Path) -> None:
     controller_workspace = tmp_path / "controller"
     first_path = tmp_path / "first-operation.json"
@@ -974,10 +1038,10 @@ def test_duplicate_concurrent_session_creation_is_idempotent(tmp_path: Path, mon
     assert not (agent_layout(controller_workspace, "agent_one").runtime_dir / ".lifecycle.lock").exists()
 
 
-def _agent_spec() -> dict[str, object]:
+def _agent_spec(agent_id: str = "agent_one") -> dict[str, object]:
     return {
-        "agent_id": "agent_one",
-        "workspace_ref": "controller://agents/agent_one/workspace",
+        "agent_id": agent_id,
+        "workspace_ref": f"controller://agents/{agent_id}/workspace",
         "backend": {
             "kind": "opencode",
             "server": {"host": "127.0.0.1", "port": 4096},

@@ -51,6 +51,7 @@ SUPPORTED_ADAPTER_OPERATIONS = frozenset(
         "ValidateRuntimeSpec",
         "CheckReadiness",
         "InspectRuntime",
+        "ReadEvents",
         "StartRuntime",
         "StopRuntime",
         "CreateSession",
@@ -506,12 +507,14 @@ def adapter_operation(
         raise typer.Exit(code=1) from exc
 
     try:
-        result = _replay_idempotent_result(operation_value)
+        use_idempotent_result = _operation_uses_idempotent_result(operation_value)
+        result = _replay_idempotent_result(operation_value) if use_idempotent_result else None
         if result is None:
             payload, content_type = _execute_adapter_operation(operation_value)
             result = _adapter_operation_result(operation_value, operation, payload, content_type)
             _record_adapter_event(operation_value, payload)
-            _record_idempotent_result(operation_value, result)
+            if use_idempotent_result:
+                _record_idempotent_result(operation_value, result)
     except (
         AdapterOperationError,
         ContractValidationError,
@@ -574,6 +577,14 @@ def _execute_adapter_operation(operation: dict[str, object]) -> tuple[dict[str, 
 
     if operation_type == "InspectRuntime":
         return (observe_runtime_inventory(controller_workspace), "application/vnd.tradecraft.runtime-inventory+json")
+
+    if operation_type == "ReadEvents":
+        payload = _adapter_operation_payload(operation)
+        validate_agent_runtime_contract("runtime-resources.schema.json", payload)
+        return (
+            _read_adapter_event_batch(controller_workspace, payload),
+            "application/vnd.tradecraft.adapter-event-batch+json",
+        )
 
     if operation_type == "StartRuntime":
         payload = _adapter_operation_payload(operation)
@@ -1015,6 +1026,45 @@ def _record_adapter_event(operation: dict[str, object], result_payload: dict[str
         journal.write("\n")
 
 
+def _operation_uses_idempotent_result(operation: dict[str, object]) -> bool:
+    return _operation_string(operation, "operation_type") != "ReadEvents"
+
+
+def _read_adapter_event_batch(controller_workspace: Path, request: dict[str, Any]) -> dict[str, Any]:
+    from_sequence = _request_int(request, "from_sequence")
+    max_events = _optional_request_int(request, "max_events") or 1000
+    journal_path = controller_workspace / "adapter-events" / "events.jsonl"
+    matching_events: list[dict[str, Any]] = []
+    if journal_path.exists():
+        for line in journal_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            event = json.loads(line)
+            if not isinstance(event, dict):
+                raise ContractValidationError("Adapter event journal entries must be JSON objects.")
+            validate_agent_runtime_contract("runtime-adapter-message.schema.json", event)
+            sequence = _request_int(cast(dict[str, Any], event), "sequence")
+            if sequence >= from_sequence:
+                matching_events.append(cast(dict[str, Any], event))
+
+    events = matching_events[:max_events]
+    through_sequence = _request_int(events[-1], "sequence") if events else from_sequence - 1
+    next_sequence = through_sequence + 1 if events else from_sequence
+    batch = {
+        "document_type": "adapter_event_batch",
+        "adapter_kind": ADAPTER_KIND,
+        "adapter_version": ADAPTER_VERSION,
+        "from_sequence": from_sequence,
+        "through_sequence": through_sequence,
+        "next_sequence": next_sequence,
+        "events": events,
+        "exhausted": len(matching_events) <= max_events,
+        "generated_at": _utc_now(),
+    }
+    validate_agent_runtime_contract("runtime-resources.schema.json", batch)
+    return batch
+
+
 def _next_adapter_event_sequence(event_root: Path) -> int:
     sequence_path = event_root / "sequence.txt"
     if not sequence_path.exists():
@@ -1189,6 +1239,22 @@ def _result_string(result_payload: dict[str, Any], key: str) -> str:
     value = result_payload[key]
     if not isinstance(value, str) or not value:
         raise ContractValidationError(f"Adapter operation result {key} must be a non-empty string.")
+    return value
+
+
+def _request_int(payload: dict[str, Any], key: str) -> int:
+    value = payload[key]
+    if not isinstance(value, int) or value < 0:
+        raise ContractValidationError(f"Adapter operation request {key} must be a non-negative integer.")
+    return value
+
+
+def _optional_request_int(payload: dict[str, Any], key: str) -> int | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, int) or value < 1:
+        raise ContractValidationError(f"Adapter operation request {key} must be a positive integer when present.")
     return value
 
 
