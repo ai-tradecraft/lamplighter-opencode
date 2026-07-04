@@ -814,6 +814,69 @@ def test_adapter_operation_CollectsDiagnostics_ThenReturnsDiagnosticManifest(tmp
     assert {artifact["artifact_type"] for artifact in artifacts} == {"diagnostic"}
 
 
+def test_adapter_operation_PublishesDocumentSource_ThenReturnsPublicationResult(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("LAMPLIGHTER_OPENCODE_USE_REAL_BACKEND", raising=False)
+    controller_workspace = tmp_path / "controller"
+    spec_path = tmp_path / "agent-spec.json"
+    spec_path.write_text(json.dumps(_agent_spec()), encoding="utf-8")
+    runner.invoke(
+        app,
+        [
+            "prepare-agent",
+            "--spec",
+            str(spec_path),
+            "--controller-workspace",
+            str(controller_workspace),
+            "--skip-backend-env-check",
+        ],
+    )
+    layout = agent_layout(controller_workspace, "agent_one")
+    source_path = layout.workspace_dir / "docs" / "architecture.md"
+    source_path.parent.mkdir(parents=True)
+    source_path.write_text("# Runtime Architecture\n", encoding="utf-8")
+    operation = _adapter_operation(
+        "PublishDocument",
+        {"runtime_id": "agent_one", "agent_session_id": "session_one", "invocation_id": "turn_one"},
+        {
+            "document_type": "document_publication_request",
+            "publication_id": "publication_one",
+            "source": {"workspace_path": "docs/architecture.md"},
+            "logical_path": "design/architecture.md",
+            "title": "Runtime Architecture",
+            "media_type": "text/markdown",
+            "version_intent": "minor",
+            "idempotency_key": "turn_one:publish:architecture",
+            "target": {
+                "controller_id": "controller_one",
+                "runtime_id": "agent_one",
+                "agent_session_id": "session_one",
+                "invocation_id": "turn_one",
+            },
+            "correlation": {"command_id": "cmd_publish_document", "invocation_id": "turn_one"},
+        },
+        controller_workspace,
+    )
+    operation["operation_id"] = "cmd_publish_document"
+    operation["idempotency_key"] = "publish_document_one"
+    operation_path = tmp_path / "publish-document.json"
+    operation_path.write_text(json.dumps(operation), encoding="utf-8")
+
+    result = runner.invoke(app, ["adapter-operation", "--operation", str(operation_path), "--json"])
+
+    assert result.exit_code == 0, result.stdout
+    envelope = json.loads(result.stdout)
+    validate_agent_runtime_contract("runtime-adapter-message.schema.json", envelope)
+    publication = _read_result_ref_payload(envelope)
+    validate_agent_runtime_contract("runtime-resources.schema.json", publication)
+    assert publication["document_type"] == "document_publication_result"
+    assert publication["publication_id"] == "publication_one"
+    assert publication["document_ref"] == "document://local/design/architecture.md"
+    content_ref = cast(dict[str, object], publication["content_ref"])
+    assert content_ref["uri"] == source_path.resolve().as_uri()
+    events = _read_adapter_events(controller_workspace)
+    assert [event["event_type"] for event in events] == ["document.publication_requested"]
+
+
 def test_adapter_operation_InteractionChannelLifecycle_ThenPersistsSessionAndMessages(tmp_path: Path) -> None:
     controller_workspace = tmp_path / "controller"
     content_path = tmp_path / "message.md"

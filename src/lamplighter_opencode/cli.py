@@ -7,7 +7,7 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any, cast
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 import typer
 from rich.console import Console
@@ -62,6 +62,7 @@ SUPPORTED_ADAPTER_OPERATIONS = frozenset(
         "RestoreSnapshot",
         "CollectArtifacts",
         "CollectDiagnostics",
+        "PublishDocument",
         "OpenInteractionChannel",
         "SendInteractionInput",
         "AcknowledgeInteractionMessage",
@@ -730,6 +731,14 @@ def _execute_adapter_operation(operation: dict[str, object]) -> tuple[dict[str, 
             "application/vnd.tradecraft.artifact-manifest+json",
         )
 
+    if operation_type == "PublishDocument":
+        payload = _adapter_operation_payload(operation)
+        validate_agent_runtime_contract("runtime-resources.schema.json", payload)
+        return (
+            _publish_document(controller_workspace, target, payload),
+            "application/vnd.tradecraft.document-publication-result+json",
+        )
+
     raise UnsupportedAdapterOperationError(f"Unsupported adapter operation: {operation_type}")
 
 
@@ -755,7 +764,7 @@ def _adapter_descriptor() -> dict[str, Any]:
             "reconstructed_restore": True,
             "snapshot_consistency_modes": ["crash_consistent"],
             "snapshot_transfer_profiles": ["local_content_handle"],
-            "document_publication_source": False,
+            "document_publication_source": True,
             "artifact_collection": True,
             "transcript_read": True,
             "transcript_source_ids": True,
@@ -800,6 +809,78 @@ def _collect_artifact_manifest(
     }
     validate_agent_runtime_contract("runtime-resources.schema.json", manifest)
     return manifest
+
+
+def _publish_document(
+    controller_workspace: Path,
+    target: dict[str, object],
+    request: dict[str, Any],
+) -> dict[str, Any]:
+    content_ref = _publication_content_reference(controller_workspace, target, request)
+    publication_id = _result_string(request, "publication_id")
+    logical_path = _result_string(request, "logical_path")
+    version_intent = _result_string(request, "version_intent")
+    result = {
+        "document_type": "document_publication_result",
+        "publication_id": publication_id,
+        "document_ref": f"document://local/{quote(logical_path, safe='/')}",
+        "version_ref": f"document-version://local/{quote(publication_id, safe='')}",
+        "content_ref": content_ref,
+        "created": version_intent == "create",
+        "published_at": _utc_now(),
+        "extensions": {
+            "tradecraft.dev/publication_scope": "adapter_local_source_handoff",
+            "tradecraft.dev/controller_publication_required": True,
+        },
+    }
+    validate_agent_runtime_contract("runtime-resources.schema.json", result)
+    return result
+
+
+def _publication_content_reference(
+    controller_workspace: Path,
+    target: dict[str, object],
+    request: dict[str, Any],
+) -> dict[str, object]:
+    source = request.get("source")
+    if not isinstance(source, dict):
+        raise ContractValidationError("Document publication source must be a JSON object.")
+    content_ref = source.get("content_ref")
+    if isinstance(content_ref, dict):
+        validate_agent_runtime_contract("runtime-resources.schema.json", _content_ref_validation_manifest(content_ref))
+        return cast(dict[str, object], content_ref)
+
+    workspace_path = source.get("workspace_path")
+    if not isinstance(workspace_path, str) or not workspace_path:
+        raise ContractValidationError("Document publication source must include workspace_path or content_ref.")
+    relative_path = Path(workspace_path)
+    if relative_path.is_absolute():
+        raise ContractValidationError("Document publication workspace_path must be relative.")
+    layout = agent_layout(controller_workspace, _target_string(target, "runtime_id"))
+    workspace_root = layout.workspace_dir.resolve()
+    source_path = (workspace_root / relative_path).resolve()
+    if not source_path.is_relative_to(workspace_root):
+        raise ContractValidationError("Document publication workspace_path escapes the runtime workspace.")
+    if not source_path.is_file():
+        raise ContractValidationError(f"Document publication source file was not found: {workspace_path}")
+    media_type = _result_string(request, "media_type")
+    return _content_reference(source_path, media_type)
+
+
+def _content_ref_validation_manifest(content_ref: dict[object, object]) -> dict[str, object]:
+    return {
+        "document_type": "artifact_manifest",
+        "manifest_id": "artifact_manifest_publication_source",
+        "created_at": _utc_now(),
+        "artifacts": [
+            {
+                "artifact_id": "artifact_publication_source",
+                "artifact_type": "document_source",
+                "content_ref": content_ref,
+                "created_at": _utc_now(),
+            }
+        ],
+    }
 
 
 def _open_interaction_channel(controller_workspace: Path, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1136,6 +1217,17 @@ def _adapter_event_for_operation(
             aggregate_type="snapshot",
             aggregate_id=snapshot_id,
             target={**target, "snapshot_id": snapshot_id},
+            payload=result_payload,
+        )
+    if operation_type == "PublishDocument":
+        aggregate_type = "invocation" if _optional_target_string(target, "invocation_id") else "runtime"
+        aggregate_id = _optional_target_string(target, "invocation_id") or _target_string(target, "runtime_id")
+        return _adapter_event(
+            operation,
+            event_type="document.publication_requested",
+            aggregate_type=aggregate_type,
+            aggregate_id=aggregate_id,
+            target=target,
             payload=result_payload,
         )
     if operation_type == "OpenInteractionChannel":

@@ -94,6 +94,7 @@ Supported operations are:
 - `RestoreSnapshot`
 - `CollectArtifacts`
 - `CollectDiagnostics`
+- `PublishDocument`
 - `OpenInteractionChannel`
 - `SendInteractionInput`
 - `AcknowledgeInteractionMessage`
@@ -110,13 +111,17 @@ schema-valid `adapter_event_batch` pages from the local event journal.
 `snapshot_manifest` content ref and a namespaced local descriptor reference for
 inspection-only restore. Artifact and diagnostic collection operations return
 schema-valid `artifact_manifest` payloads with bounded local file content
-references. Interaction channel operations use a controller-workspace-local
-session/message journal under `interactions/<interaction_session_id>/` and
-return schema-valid `interaction_session` / `interaction_message` payloads.
-Completed mutating operations with canonical mappings also append schema-valid
-`adapter.event` envelopes to `adapter-events/events.jsonl` with monotonic local
-sequence numbers. OpenCode-specific work remains an implementation detail
-behind that boundary.
+references. `PublishDocument` resolves a bounded workspace-relative source or
+existing content reference and returns a schema-valid
+`document_publication_result` with a local content reference for controller-side
+durable publication. Interaction channel operations use a
+controller-workspace-local session/message journal under
+`interactions/<interaction_session_id>/` and return schema-valid
+`interaction_session` / `interaction_message` payloads. Completed mutating
+operations with canonical mappings also append schema-valid `adapter.event`
+envelopes to `adapter-events/events.jsonl` with monotonic local sequence
+numbers. OpenCode-specific work remains an implementation detail behind that
+boundary.
 
 For local debugging, the adapter also exposes a direct observation convenience:
 

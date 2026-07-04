@@ -134,6 +134,7 @@ def test_adapter_operation_describes_adapter(tmp_path: Path) -> None:
     assert descriptor["adapter_kind"] == "opencode"
     capabilities = cast(dict[str, object], descriptor["capabilities"])
     assert capabilities["snapshot_capture"] is True
+    assert capabilities["document_publication_source"] is True
 
 
 def test_adapter_operation_checks_readiness(tmp_path: Path) -> None:
