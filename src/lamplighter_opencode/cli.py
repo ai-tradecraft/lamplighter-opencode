@@ -654,7 +654,10 @@ def _execute_adapter_operation(operation: dict[str, object]) -> tuple[dict[str, 
             consistency=_snapshot_consistency(payload),
             checkpoint_candidate=bool(payload.get("checkpoint_candidate", False)),
         )
-        return (descriptor, "application/vnd.tradecraft.local-snapshot-descriptor+json")
+        return (
+            _canonical_snapshot_descriptor(descriptor, payload, target, operation),
+            "application/vnd.tradecraft.snapshot-descriptor+json",
+        )
 
     if operation_type == "RestoreSnapshot":
         payload = _adapter_operation_payload(operation)
@@ -938,7 +941,190 @@ def _snapshot_consistency(payload: dict[str, Any]) -> str:
     return "crash-consistent"
 
 
+def _canonical_snapshot_descriptor(
+    local_descriptor: dict[str, Any],
+    snapshot_request: dict[str, Any],
+    target: dict[str, object],
+    operation: dict[str, object],
+) -> dict[str, Any]:
+    descriptor_path = Path(str(local_descriptor["descriptor_path"])).expanduser().resolve()
+    snapshot_root = descriptor_path.parent
+    manifest_path = snapshot_root / str(
+        cast(dict[str, Any], local_descriptor["manifest"]).get("path") or "manifest.json"
+    )
+    local_manifest = _read_json_object(manifest_path)
+    canonical_manifest = _canonical_snapshot_manifest(snapshot_root, local_manifest)
+    canonical_manifest_path = snapshot_root / "snapshot-manifest.v1.json"
+    _write_json(canonical_manifest_path, canonical_manifest)
+    validate_agent_runtime_contract("runtime-resources.schema.json", canonical_manifest)
+
+    checkpoint_candidate = bool(
+        snapshot_request.get("checkpoint_candidate", local_descriptor.get("checkpoint_candidate", False))
+    )
+    purpose = _canonical_snapshot_purpose(snapshot_request, checkpoint_candidate)
+    descriptor = {
+        "document_type": "snapshot_descriptor",
+        "snapshot_id": str(local_descriptor["snapshot_id"]),
+        "target": {
+            **_operation_object(operation, "target"),
+            "runtime_id": _target_string(target, "runtime_id"),
+        },
+        "created_at": str(local_descriptor["created_at"]),
+        "purpose": purpose,
+        "requested_by": _canonical_requested_by(snapshot_request),
+        "trigger": str(snapshot_request.get("reason") or "adapter_snapshot_capture"),
+        "consistency": _canonical_consistency(snapshot_request),
+        "contents": _canonical_snapshot_contents(snapshot_request, canonical_manifest),
+        "resumability_mode": "manual",
+        "portable": False,
+        "side_effect_state": "ambiguous",
+        "retention": {
+            "class": "candidate" if checkpoint_candidate else _retention_class(purpose),
+        },
+        "checkpoint_candidate": checkpoint_candidate,
+        "content_ref": _content_reference(
+            canonical_manifest_path,
+            "application/vnd.tradecraft.snapshot-manifest+json",
+            schema_ref="https://schemas.tradecraft.dev/agent-runtime/v1/runtime-resources.schema.json#/$defs/snapshot_manifest",
+        ),
+        "adapter_kind": ADAPTER_KIND,
+        "adapter_version": ADAPTER_VERSION,
+        "extensions": {
+            "tradecraft.dev/local_snapshot_ref": str(local_descriptor.get("snapshot_ref") or ""),
+            "tradecraft.dev/local_descriptor_ref": _content_reference(
+                descriptor_path,
+                "application/vnd.tradecraft.local-snapshot-descriptor+json",
+            ),
+            "tradecraft.dev/local_descriptor_path": str(descriptor_path),
+        },
+    }
+    requested_by_ref = snapshot_request.get("requested_by_ref")
+    if isinstance(requested_by_ref, str):
+        descriptor["requested_by_ref"] = requested_by_ref
+    validate_agent_runtime_contract("runtime-resources.schema.json", descriptor)
+    return descriptor
+
+
+def _canonical_snapshot_manifest(snapshot_root: Path, local_manifest: dict[str, object]) -> dict[str, Any]:
+    components = local_manifest.get("components")
+    if not isinstance(components, list):
+        raise ContractValidationError("Local snapshot manifest must contain components.")
+    canonical_components: list[dict[str, Any]] = []
+    for component in components:
+        if not isinstance(component, dict):
+            raise ContractValidationError("Local snapshot component must be a JSON object.")
+        path_value = component.get("path")
+        if not isinstance(path_value, str):
+            raise ContractValidationError("Local snapshot component path must be a string.")
+        component_path = (snapshot_root / path_value).resolve()
+        canonical_components.append(
+            {
+                "kind": _canonical_snapshot_component_kind(str(component.get("kind") or "")),
+                "content_ref": _content_reference(component_path, _content_type(component_path)),
+                "required_for_restore": bool(component.get("required_for_restoration", False)),
+                "adapter_kind": ADAPTER_KIND,
+                "adapter_version": ADAPTER_VERSION,
+                "sensitivity": str(component.get("sensitivity") or "internal"),
+            }
+        )
+    return {
+        "document_type": "snapshot_manifest",
+        "snapshot_id": str(local_manifest["snapshot_id"]),
+        "created_at": str(local_manifest["created_at"]),
+        "components": canonical_components,
+        "extensions": {
+            "tradecraft.dev/local_manifest_ref": _content_reference(
+                snapshot_root / "manifest.json",
+                "application/vnd.tradecraft.local-snapshot-manifest+json",
+            )
+        },
+    }
+
+
+def _canonical_snapshot_component_kind(local_kind: str) -> str:
+    return {
+        "workspace_filesystem_manifest": "workspace",
+        "agent_metadata": "agent_spec",
+        "backend_config": "environment",
+        "provider_server_metadata": "provider_state",
+        "agent_session_metadata": "agent_session",
+    }.get(local_kind, "restore_recipe")
+
+
+def _canonical_snapshot_purpose(snapshot_request: dict[str, Any], checkpoint_candidate: bool) -> str:
+    purpose = snapshot_request.get("purpose")
+    if purpose in {"recovery_point", "checkpoint_candidate", "diagnostic", "migration"}:
+        return str(purpose)
+    return "checkpoint_candidate" if checkpoint_candidate else "recovery_point"
+
+
+def _canonical_requested_by(snapshot_request: dict[str, Any]) -> str:
+    requested_by = snapshot_request.get("requested_by")
+    if requested_by in {"agent", "orchestrator", "controller", "operator", "policy", "adapter"}:
+        return str(requested_by)
+    return "adapter"
+
+
+def _canonical_consistency(snapshot_request: dict[str, Any]) -> str:
+    consistency = snapshot_request.get("consistency")
+    if consistency in {"application_consistent", "quiesced", "crash_consistent"}:
+        return str(consistency)
+    return "crash_consistent"
+
+
+def _canonical_snapshot_contents(
+    snapshot_request: dict[str, Any],
+    canonical_manifest: dict[str, Any],
+) -> list[str]:
+    requested = snapshot_request.get("include")
+    if isinstance(requested, list):
+        contents = [item for item in requested if isinstance(item, str)]
+        if contents:
+            return sorted(set(contents))
+    components = canonical_manifest.get("components")
+    if isinstance(components, list):
+        contents = [component.get("kind") for component in components if isinstance(component, dict)]
+        values = [value for value in contents if isinstance(value, str)]
+        if values:
+            return sorted(set(values))
+    return ["workspace", "restore_recipe"]
+
+
+def _retention_class(purpose: str) -> str:
+    if purpose == "checkpoint_candidate":
+        return "candidate"
+    if purpose == "diagnostic":
+        return "diagnostic"
+    return "rolling"
+
+
+def _content_reference(path: Path, content_type: str, *, schema_ref: str | None = None) -> dict[str, object]:
+    content = path.read_bytes()
+    reference: dict[str, object] = {
+        "uri": path.resolve().as_uri(),
+        "sha256": hashlib.sha256(content).hexdigest(),
+        "content_type": content_type,
+        "length": len(content),
+    }
+    if schema_ref is not None:
+        reference["schema_ref"] = schema_ref
+    return reference
+
+
 def _snapshot_descriptor_path(payload: dict[str, Any]) -> Path:
+    if payload.get("document_type") == "snapshot_descriptor":
+        extensions = payload.get("extensions")
+        if isinstance(extensions, dict):
+            local_path = extensions.get("tradecraft.dev/local_descriptor_path")
+            if isinstance(local_path, str):
+                return Path(local_path)
+            local_ref = extensions.get("tradecraft.dev/local_descriptor_ref")
+            if isinstance(local_ref, dict):
+                uri = local_ref.get("uri")
+                if isinstance(uri, str):
+                    parsed = urlparse(uri)
+                    if parsed.scheme == "file":
+                        return Path(unquote(parsed.path))
     snapshot_value = payload.get("snapshot")
     if isinstance(snapshot_value, str):
         return Path(snapshot_value)

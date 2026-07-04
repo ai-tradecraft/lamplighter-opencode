@@ -612,14 +612,24 @@ def test_adapter_operation_CreatesAndRestoresSnapshot_ThenReturnsResultRefs(tmp_
     created_envelope = json.loads(created.stdout)
     validate_agent_runtime_contract("runtime-adapter-message.schema.json", created_envelope)
     descriptor = _read_result_ref_payload(created_envelope)
-    descriptor_path = Path(cast(str, descriptor["descriptor_path"]))
+    validate_agent_runtime_contract("runtime-resources.schema.json", descriptor)
+    assert descriptor["document_type"] == "snapshot_descriptor"
+    assert descriptor["resumability_mode"] == "manual"
+    descriptor_extensions = cast(dict[str, object], descriptor["extensions"])
+    local_descriptor_ref = cast(dict[str, object], descriptor_extensions["tradecraft.dev/local_descriptor_ref"])
+    local_descriptor_uri = cast(str, local_descriptor_ref["uri"])
+    descriptor_path = Path(unquote(urlparse(local_descriptor_uri).path))
     assert descriptor_path.exists()
+    manifest_ref = cast(dict[str, object], descriptor["content_ref"])
+    manifest_path = Path(unquote(urlparse(cast(str, manifest_ref["uri"])).path))
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    validate_agent_runtime_contract("runtime-resources.schema.json", manifest)
 
     restore_path = tmp_path / "restore-snapshot-operation.json"
     restore_operation = _adapter_operation(
         "RestoreSnapshot",
         {"runtime_id": "agent_one"},
-        {"descriptor_path": str(descriptor_path), "restored_agent_id": "agent_restored"},
+        {"descriptor_ref": local_descriptor_ref, "restored_agent_id": "agent_restored"},
         controller_workspace,
     )
     restore_operation["operation_id"] = "cmd_snapshot_restore"
