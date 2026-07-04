@@ -91,6 +91,8 @@ Supported operations are:
 - `ReadTranscript`
 - `CreateSnapshot`
 - `RestoreSnapshot`
+- `CollectArtifacts`
+- `CollectDiagnostics`
 
 Unsupported optional protocol operations return a failed
 `adapter.operation_result` with `error.classification` set to
@@ -99,8 +101,10 @@ and replayed for identical repeated operations; reusing a key for a different
 operation returns a `conflict` error. `InspectRuntime` uses this same operation
 path for controller heartbeat inventory. Snapshot operations expose the
 adapter-local, inspection-oriented snapshot capture/restore implementation
-behind the shared envelope. OpenCode-specific work remains an implementation
-detail behind that boundary.
+behind the shared envelope. Artifact and diagnostic collection operations return
+schema-valid `artifact_manifest` payloads with bounded local file content
+references. OpenCode-specific work remains an implementation detail behind that
+boundary.
 
 For local debugging, the adapter also exposes a direct observation convenience:
 

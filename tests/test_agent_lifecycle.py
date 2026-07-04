@@ -638,6 +638,101 @@ def test_adapter_operation_CreatesAndRestoresSnapshot_ThenReturnsResultRefs(tmp_
     assert (restored_layout.workspace_dir / "notes.md").read_text(encoding="utf-8") == "snapshot me"
 
 
+def test_adapter_operation_CollectsSessionArtifacts_ThenReturnsArtifactManifest(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("LAMPLIGHTER_OPENCODE_USE_REAL_BACKEND", raising=False)
+    controller_workspace = tmp_path / "controller"
+    spec_path = tmp_path / "agent-spec.json"
+    spec_path.write_text(json.dumps(_agent_spec()), encoding="utf-8")
+    runner.invoke(
+        app,
+        [
+            "prepare-agent",
+            "--spec",
+            str(spec_path),
+            "--controller-workspace",
+            str(controller_workspace),
+            "--skip-backend-env-check",
+        ],
+    )
+    runner.invoke(
+        app,
+        [
+            "start-agent",
+            "--agent",
+            "agent_one",
+            "--controller-workspace",
+            str(controller_workspace),
+            "--dry-run",
+        ],
+    )
+    create_agent_session(AgentChatSessionSpec.from_dict(_session_spec("session_one")), controller_workspace)
+    artifact_path = agent_session_layout(controller_workspace, "agent_one", "session_one").artifacts_dir / "report.md"
+    artifact_path.write_text("# Report\n", encoding="utf-8")
+    operation = _adapter_operation(
+        "CollectArtifacts",
+        {"runtime_id": "agent_one", "agent_session_id": "session_one"},
+        {},
+        controller_workspace,
+    )
+    operation["operation_id"] = "cmd_collect_artifacts"
+    operation["idempotency_key"] = "collect_artifacts_one"
+    operation_path = tmp_path / "collect-artifacts.json"
+    operation_path.write_text(json.dumps(operation), encoding="utf-8")
+
+    result = runner.invoke(app, ["adapter-operation", "--operation", str(operation_path), "--json"])
+
+    assert result.exit_code == 0, result.stdout
+    envelope = json.loads(result.stdout)
+    validate_agent_runtime_contract("runtime-adapter-message.schema.json", envelope)
+    manifest = _read_result_ref_payload(envelope)
+    validate_agent_runtime_contract("runtime-resources.schema.json", manifest)
+    artifact = cast(list[dict[str, object]], manifest["artifacts"])[0]
+    assert artifact["artifact_type"] == "artifact"
+    content_ref = cast(dict[str, object], artifact["content_ref"])
+    assert content_ref["uri"] == artifact_path.resolve().as_uri()
+
+
+def test_adapter_operation_CollectsDiagnostics_ThenReturnsDiagnosticManifest(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("LAMPLIGHTER_OPENCODE_USE_REAL_BACKEND", raising=False)
+    controller_workspace = tmp_path / "controller"
+    spec_path = tmp_path / "agent-spec.json"
+    spec_path.write_text(json.dumps(_agent_spec()), encoding="utf-8")
+    runner.invoke(
+        app,
+        [
+            "prepare-agent",
+            "--spec",
+            str(spec_path),
+            "--controller-workspace",
+            str(controller_workspace),
+            "--skip-backend-env-check",
+        ],
+    )
+    layout = agent_layout(controller_workspace, "agent_one")
+    (layout.logs_dir / "adapter.log").write_text("diagnostic log\n", encoding="utf-8")
+    operation = _adapter_operation(
+        "CollectDiagnostics",
+        {"runtime_id": "agent_one"},
+        {},
+        controller_workspace,
+    )
+    operation["operation_id"] = "cmd_collect_diagnostics"
+    operation["idempotency_key"] = "collect_diagnostics_one"
+    operation_path = tmp_path / "collect-diagnostics.json"
+    operation_path.write_text(json.dumps(operation), encoding="utf-8")
+
+    result = runner.invoke(app, ["adapter-operation", "--operation", str(operation_path), "--json"])
+
+    assert result.exit_code == 0, result.stdout
+    envelope = json.loads(result.stdout)
+    validate_agent_runtime_contract("runtime-adapter-message.schema.json", envelope)
+    manifest = _read_result_ref_payload(envelope)
+    validate_agent_runtime_contract("runtime-resources.schema.json", manifest)
+    artifacts = cast(list[dict[str, object]], manifest["artifacts"])
+    assert artifacts
+    assert {artifact["artifact_type"] for artifact in artifacts} == {"diagnostic"}
+
+
 def test_restore_snapshot_rejects_tampered_workspace_file(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("LAMPLIGHTER_OPENCODE_USE_REAL_BACKEND", raising=False)
     controller_workspace = tmp_path / "controller"

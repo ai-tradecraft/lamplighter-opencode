@@ -59,6 +59,8 @@ SUPPORTED_ADAPTER_OPERATIONS = frozenset(
         "ReadTranscript",
         "CreateSnapshot",
         "RestoreSnapshot",
+        "CollectArtifacts",
+        "CollectDiagnostics",
     }
 )
 
@@ -668,6 +670,18 @@ def _execute_adapter_operation(operation: dict[str, object]) -> tuple[dict[str, 
             "application/vnd.tradecraft.local-snapshot-restore-result+json",
         )
 
+    if operation_type == "CollectArtifacts":
+        return (
+            _collect_artifact_manifest(controller_workspace, target, diagnostic=False),
+            "application/vnd.tradecraft.artifact-manifest+json",
+        )
+
+    if operation_type == "CollectDiagnostics":
+        return (
+            _collect_artifact_manifest(controller_workspace, target, diagnostic=True),
+            "application/vnd.tradecraft.artifact-manifest+json",
+        )
+
     raise UnsupportedAdapterOperationError(f"Unsupported adapter operation: {operation_type}")
 
 
@@ -694,7 +708,7 @@ def _adapter_descriptor() -> dict[str, Any]:
             "snapshot_consistency_modes": ["crash_consistent"],
             "snapshot_transfer_profiles": ["local_content_handle"],
             "document_publication_source": False,
-            "artifact_collection": False,
+            "artifact_collection": True,
             "transcript_read": True,
             "transcript_source_ids": True,
         },
@@ -711,6 +725,94 @@ def _adapter_descriptor() -> dict[str, Any]:
     }
     validate_agent_runtime_contract("runtime-adapter-message.schema.json", descriptor)
     return descriptor
+
+
+def _collect_artifact_manifest(
+    controller_workspace: Path,
+    target: dict[str, object],
+    *,
+    diagnostic: bool,
+) -> dict[str, Any]:
+    runtime_id = _target_string(target, "runtime_id")
+    layout = agent_layout(controller_workspace, runtime_id)
+    files = (
+        _diagnostic_files(layout)
+        if diagnostic
+        else _artifact_files(layout, _optional_target_string(target, "agent_session_id"))
+    )
+    artifact_type = "diagnostic" if diagnostic else "artifact"
+    manifest = {
+        "document_type": "artifact_manifest",
+        "manifest_id": f"artifact_manifest_{hashlib.sha256(f'{runtime_id}:{artifact_type}'.encode()).hexdigest()[:16]}",
+        "created_at": _utc_now(),
+        "artifacts": [
+            _artifact_descriptor(layout.root, path, artifact_type=artifact_type)
+            for path in sorted(files, key=lambda item: item.as_posix())
+        ],
+    }
+    validate_agent_runtime_contract("runtime-resources.schema.json", manifest)
+    return manifest
+
+
+def _artifact_files(layout: Any, session_id: str | None) -> list[Path]:
+    session_roots = [layout.sessions_dir / session_id] if session_id else sorted(layout.sessions_dir.glob("session_*"))
+    files: list[Path] = []
+    for session_root in session_roots:
+        artifacts_dir = session_root / "artifacts"
+        if artifacts_dir.is_dir():
+            files.extend(path for path in artifacts_dir.rglob("*") if path.is_file())
+    return files
+
+
+def _diagnostic_files(layout: Any) -> list[Path]:
+    candidates = [
+        layout.metadata_path,
+        layout.backend_config_path,
+        layout.server_metadata_path,
+    ]
+    if layout.logs_dir.is_dir():
+        candidates.extend(path for path in layout.logs_dir.rglob("*") if path.is_file())
+    if layout.sessions_dir.is_dir():
+        for session_root in sorted(layout.sessions_dir.glob("session_*")):
+            candidates.extend(
+                path
+                for path in [
+                    session_root / "session.json",
+                    session_root / "context.json",
+                    session_root / "events.jsonl",
+                ]
+                if path.is_file()
+            )
+    return [path for path in candidates if path.is_file()]
+
+
+def _artifact_descriptor(root: Path, path: Path, *, artifact_type: str) -> dict[str, Any]:
+    content = path.read_bytes()
+    relative = path.resolve().relative_to(root.resolve())
+    artifact_id = f"artifact_{_safe_identifier(relative.as_posix(), 'artifact_')}"
+    return {
+        "artifact_id": artifact_id,
+        "artifact_type": artifact_type,
+        "content_ref": {
+            "uri": path.resolve().as_uri(),
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "content_type": _content_type(path),
+            "length": len(content),
+        },
+        "created_at": datetime.fromtimestamp(path.stat().st_mtime, UTC).isoformat().replace("+00:00", "Z"),
+        "producer_ref": f"adapter://{ADAPTER_KIND}/{ADAPTER_VERSION}",
+        "sensitivity": "internal",
+    }
+
+
+def _content_type(path: Path) -> str:
+    if path.suffix == ".json":
+        return "application/json"
+    if path.suffix == ".jsonl":
+        return "application/x-ndjson"
+    if path.suffix in {".log", ".md", ".txt"}:
+        return "text/plain"
+    return "application/octet-stream"
 
 
 def _adapter_operation_result(
