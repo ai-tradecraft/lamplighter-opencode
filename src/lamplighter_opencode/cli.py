@@ -23,6 +23,7 @@ from lamplighter_opencode.contracts.validation import (
     validate_agent_runtime_contract,
     validate_contract,
 )
+from lamplighter_opencode.runtime.deployment import SUPPORTED_DEPLOYMENT_MODES, current_deployment_mode
 from lamplighter_opencode.runtime.inventory import observe_runtime_inventory
 from lamplighter_opencode.runtime.layout import agent_layout
 from lamplighter_opencode.runtime.workspace import (
@@ -743,13 +744,14 @@ def _execute_adapter_operation(operation: dict[str, object]) -> tuple[dict[str, 
 
 
 def _adapter_descriptor() -> dict[str, Any]:
+    deployment_mode = current_deployment_mode()
     descriptor = {
         "message_type": "adapter.descriptor",
         "protocol_version": "1.0",
         "schema_version": "1.0",
         "adapter_kind": ADAPTER_KIND,
         "adapter_version": ADAPTER_VERSION,
-        "deployment_modes": ["local_process"],
+        "deployment_modes": list(SUPPORTED_DEPLOYMENT_MODES),
         "capabilities": {
             "persistent_runtime": True,
             "persistent_sessions": True,
@@ -777,7 +779,7 @@ def _adapter_descriptor() -> dict[str, Any]:
         "config_schema": "adapter-schema://opencode/1.0",
         "composition": {
             "backend": {"kind": "opencode", "version": "configured-locally"},
-            "execution_environment": {"kind": "local_process", "version": "1.0"},
+            "execution_environment": {"kind": deployment_mode, "version": "1.0"},
         },
     }
     validate_agent_runtime_contract("runtime-adapter-message.schema.json", descriptor)

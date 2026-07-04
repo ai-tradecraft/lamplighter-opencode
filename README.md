@@ -123,6 +123,26 @@ envelopes to `adapter-events/events.jsonl` with monotonic local sequence
 numbers. OpenCode-specific work remains an implementation detail behind that
 boundary.
 
+### Local Container Adapter Proof
+
+The same adapter operation contract can run inside a local Docker/Podman
+container. The adapter image is defined by [`Containerfile`](Containerfile) and
+sets `LAMPLIGHTER_ADAPTER_DEPLOYMENT_MODE=local_container`, while mounted
+controller workspace and `tradecraft-contracts` paths keep content and schema
+ownership outside the image.
+
+Run the opt-in proof with:
+
+```sh
+make test-container-adapter-operation
+```
+
+The target builds `lamplighter-opencode:local`, sends the same
+`adapter.operation` envelope used by the controller to `DescribeAdapter`, and
+validates the `adapter.operation_result` plus returned descriptor against the
+shared Agent Runtime schemas. Set `CONTAINER_RUNTIME=podman` to use Podman, or
+`LAMPLIGHTER_OPENCODE_CONTAINER_IMAGE=<image>` to override the image tag.
+
 For local debugging, the adapter also exposes a direct observation convenience:
 
 ```sh

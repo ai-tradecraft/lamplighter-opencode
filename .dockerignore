@@ -1,0 +1,13 @@
+.git
+.pytest_cache
+.ruff_cache
+.venv
+__pycache__
+*.pyc
+bin
+obj
+poc/chat-through-harness/client/node_modules
+poc/chat-through-harness/src/**/bin
+poc/chat-through-harness/src/**/obj
+poc/chat-through-harness/tests/**/bin
+poc/chat-through-harness/tests/**/obj

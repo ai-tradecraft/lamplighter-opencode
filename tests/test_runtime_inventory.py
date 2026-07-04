@@ -70,7 +70,21 @@ def test_observe_runtimes_command_emits_json_inventory(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.stdout
     payload = json.loads(result.stdout)
     assert payload["adapter_kind"] == "opencode"
+    assert payload["deployment_mode"] == "local_process"
     assert payload["runtimes"] == []
+
+
+def test_observe_runtime_inventory_reports_configured_container_deployment_mode(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("LAMPLIGHTER_ADAPTER_DEPLOYMENT_MODE", "local_container")
+    controller_workspace = tmp_path / "controller"
+    (controller_workspace / "agents").mkdir(parents=True)
+
+    inventory = inventory_module.observe_runtime_inventory(controller_workspace)
+
+    assert inventory["deployment_mode"] == "local_container"
 
 
 def test_adapter_operation_inspects_runtime_inventory(tmp_path: Path) -> None:
@@ -132,9 +146,35 @@ def test_adapter_operation_describes_adapter(tmp_path: Path) -> None:
     validate_agent_runtime_contract("runtime-adapter-message.schema.json", descriptor)
     assert descriptor["message_type"] == "adapter.descriptor"
     assert descriptor["adapter_kind"] == "opencode"
+    assert descriptor["deployment_modes"] == ["local_process", "local_container"]
+    composition = cast(dict[str, object], descriptor["composition"])
+    execution_environment = cast(dict[str, object], composition["execution_environment"])
+    assert execution_environment["kind"] == "local_process"
     capabilities = cast(dict[str, object], descriptor["capabilities"])
     assert capabilities["snapshot_capture"] is True
     assert capabilities["document_publication_source"] is True
+
+
+def test_adapter_operation_describes_container_adapter_when_deployment_mode_is_configured(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("LAMPLIGHTER_ADAPTER_DEPLOYMENT_MODE", "local_container")
+    controller_workspace = tmp_path / "controller"
+    operation_path = tmp_path / "operation.json"
+    operation = _adapter_operation("DescribeAdapter", "describe_container", controller_workspace)
+    validate_agent_runtime_contract("runtime-adapter-message.schema.json", operation)
+    operation_path.write_text(json.dumps(operation), encoding="utf-8")
+
+    result = runner.invoke(app, ["adapter-operation", "--operation", str(operation_path), "--json"])
+
+    assert result.exit_code == 0, result.stdout
+    envelope = json.loads(result.stdout)
+    validate_agent_runtime_contract("runtime-adapter-message.schema.json", envelope)
+    descriptor = _read_result_ref_payload(envelope)
+    composition = cast(dict[str, object], descriptor["composition"])
+    execution_environment = cast(dict[str, object], composition["execution_environment"])
+    assert execution_environment["kind"] == "local_container"
 
 
 def test_adapter_operation_checks_readiness(tmp_path: Path) -> None:

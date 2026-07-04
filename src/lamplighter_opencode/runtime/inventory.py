@@ -11,6 +11,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from lamplighter_opencode.runtime.deployment import current_deployment_mode
+
 JsonObject = dict[str, Any]
 TERMINAL_STATUSES = {"cancelled", "failed"}
 
@@ -24,7 +26,7 @@ def observe_runtime_inventory(controller_workspace: Path) -> JsonObject:
     return {
         "adapter_kind": "opencode",
         "adapter_version": "0.1.0",
-        "deployment_mode": "local_process",
+        "deployment_mode": current_deployment_mode(),
         "observed_at": observed_at,
         "capabilities": {
             "snapshot_capture": True,
