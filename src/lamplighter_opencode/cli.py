@@ -61,6 +61,10 @@ SUPPORTED_ADAPTER_OPERATIONS = frozenset(
         "RestoreSnapshot",
         "CollectArtifacts",
         "CollectDiagnostics",
+        "OpenInteractionChannel",
+        "SendInteractionInput",
+        "AcknowledgeInteractionMessage",
+        "CloseInteractionChannel",
     }
 )
 
@@ -641,6 +645,35 @@ def _execute_adapter_operation(operation: dict[str, object]) -> tuple[dict[str, 
         validate_contract("agent_chat_history.schema.json", payload)
         return (payload, "application/vnd.tradecraft.agent-chat-history+json")
 
+    if operation_type == "OpenInteractionChannel":
+        payload = _adapter_operation_payload(operation)
+        validate_agent_runtime_contract("runtime-resources.schema.json", payload)
+        return (
+            _open_interaction_channel(controller_workspace, payload),
+            "application/vnd.tradecraft.interaction-session+json",
+        )
+
+    if operation_type == "SendInteractionInput":
+        payload = _adapter_operation_payload(operation)
+        validate_agent_runtime_contract("runtime-resources.schema.json", payload)
+        return (
+            _send_interaction_input(controller_workspace, payload),
+            "application/vnd.tradecraft.interaction-message+json",
+        )
+
+    if operation_type == "AcknowledgeInteractionMessage":
+        payload = _adapter_operation_payload(operation)
+        return (
+            _acknowledge_interaction_message(controller_workspace, payload),
+            "application/vnd.tradecraft.interaction-message+json",
+        )
+
+    if operation_type == "CloseInteractionChannel":
+        return (
+            _close_interaction_channel(controller_workspace, _target_string(target, "interaction_session_id")),
+            "application/vnd.tradecraft.interaction-session+json",
+        )
+
     if operation_type == "CreateSnapshot":
         payload = _adapter_operation_payload(operation)
         if payload.get("document_type") == "snapshot_request":
@@ -701,7 +734,7 @@ def _adapter_descriptor() -> dict[str, Any]:
             "persistent_sessions": True,
             "concurrent_sessions": True,
             "streaming_output": False,
-            "synchronous_interaction": False,
+            "synchronous_interaction": True,
             "agent_initiated_interaction": False,
             "pause_resume": False,
             "snapshot_capture": True,
@@ -755,6 +788,129 @@ def _collect_artifact_manifest(
     }
     validate_agent_runtime_contract("runtime-resources.schema.json", manifest)
     return manifest
+
+
+def _open_interaction_channel(controller_workspace: Path, payload: dict[str, Any]) -> dict[str, Any]:
+    session = dict(payload)
+    now = _utc_now()
+    session["status"] = "active"
+    session["updated_at"] = now
+    session.setdefault("created_at", now)
+    session.setdefault("last_controller_sequence", 0)
+    session.setdefault("last_agent_sequence", 0)
+    interaction_id = _interaction_id(session)
+    root = _interaction_root(controller_workspace, interaction_id)
+    root.mkdir(parents=True, exist_ok=True)
+    _write_json(_interaction_session_path(controller_workspace, interaction_id), session)
+    messages_path = _interaction_messages_path(controller_workspace, interaction_id)
+    if not messages_path.exists():
+        messages_path.write_text("", encoding="utf-8")
+    validate_agent_runtime_contract("runtime-resources.schema.json", session)
+    return session
+
+
+def _send_interaction_input(controller_workspace: Path, payload: dict[str, Any]) -> dict[str, Any]:
+    message = dict(payload)
+    interaction_id = _interaction_id(message)
+    session = _read_interaction_session(controller_workspace, interaction_id)
+    sequence = int(message["sequence"])
+    sender_ref = str(message["sender_ref"])
+    if sender_ref.startswith("agent://"):
+        session["last_agent_sequence"] = max(int(session.get("last_agent_sequence") or 0), sequence)
+    else:
+        session["last_controller_sequence"] = max(int(session.get("last_controller_sequence") or 0), sequence)
+    session["status"] = "active"
+    session["updated_at"] = _utc_now()
+    _write_json(_interaction_session_path(controller_workspace, interaction_id), session)
+    with _interaction_messages_path(controller_workspace, interaction_id).open("a", encoding="utf-8") as messages:
+        messages.write(json.dumps(message, sort_keys=True))
+        messages.write("\n")
+    validate_agent_runtime_contract("runtime-resources.schema.json", message)
+    return message
+
+
+def _acknowledge_interaction_message(controller_workspace: Path, payload: dict[str, Any]) -> dict[str, Any]:
+    interaction_id = str(payload.get("interaction_session_id") or "")
+    message_id = str(payload.get("message_id") or "")
+    if not interaction_id or not message_id:
+        raise ContractValidationError(
+            "AcknowledgeInteractionMessage requires interaction_session_id and message_id payload fields."
+        )
+    messages_path = _interaction_messages_path(controller_workspace, interaction_id)
+    messages = _read_interaction_messages(messages_path)
+    acknowledged_at = str(payload.get("acknowledged_at") or _utc_now())
+    acknowledged: dict[str, Any] | None = None
+    for message in messages:
+        if message.get("message_id") == message_id:
+            message["acknowledged_at"] = acknowledged_at
+            acknowledged = message
+            break
+    if acknowledged is None:
+        raise ContractValidationError(f"Interaction message not found: {message_id}")
+    with messages_path.open("w", encoding="utf-8") as output:
+        for message in messages:
+            output.write(json.dumps(message, sort_keys=True))
+            output.write("\n")
+    session = _read_interaction_session(controller_workspace, interaction_id)
+    session["updated_at"] = acknowledged_at
+    _write_json(_interaction_session_path(controller_workspace, interaction_id), session)
+    validate_agent_runtime_contract("runtime-resources.schema.json", acknowledged)
+    return acknowledged
+
+
+def _close_interaction_channel(controller_workspace: Path, interaction_id: str) -> dict[str, Any]:
+    session = _read_interaction_session(controller_workspace, interaction_id)
+    now = _utc_now()
+    session["status"] = "closed"
+    session["updated_at"] = now
+    session["closed_at"] = now
+    _write_json(_interaction_session_path(controller_workspace, interaction_id), session)
+    validate_agent_runtime_contract("runtime-resources.schema.json", session)
+    return session
+
+
+def _interaction_id(payload: dict[str, Any]) -> str:
+    interaction_id = payload.get("interaction_session_id")
+    if not isinstance(interaction_id, str) or not interaction_id:
+        raise ContractValidationError("Interaction payload must include interaction_session_id.")
+    return interaction_id
+
+
+def _interaction_root(controller_workspace: Path, interaction_id: str) -> Path:
+    root = (controller_workspace / "interactions").expanduser().resolve()
+    interaction_root = (root / _safe_identifier(interaction_id, "interaction_")).resolve()
+    if not interaction_root.is_relative_to(root):
+        raise ContractValidationError("Interaction path escapes controller workspace.")
+    return interaction_root
+
+
+def _interaction_session_path(controller_workspace: Path, interaction_id: str) -> Path:
+    return _interaction_root(controller_workspace, interaction_id) / "session.json"
+
+
+def _interaction_messages_path(controller_workspace: Path, interaction_id: str) -> Path:
+    return _interaction_root(controller_workspace, interaction_id) / "messages.jsonl"
+
+
+def _read_interaction_session(controller_workspace: Path, interaction_id: str) -> dict[str, Any]:
+    path = _interaction_session_path(controller_workspace, interaction_id)
+    if not path.is_file():
+        raise ContractValidationError(f"Interaction session is not open: {interaction_id}")
+    return cast(dict[str, Any], _read_json_object(path))
+
+
+def _read_interaction_messages(path: Path) -> list[dict[str, Any]]:
+    if not path.is_file():
+        return []
+    messages: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        value = json.loads(line)
+        if not isinstance(value, dict):
+            raise ContractValidationError("Interaction message journal entries must be JSON objects.")
+        messages.append(cast(dict[str, Any], value))
+    return messages
 
 
 def _artifact_files(layout: Any, session_id: str | None) -> list[Path]:

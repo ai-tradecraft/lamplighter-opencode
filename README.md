@@ -93,6 +93,10 @@ Supported operations are:
 - `RestoreSnapshot`
 - `CollectArtifacts`
 - `CollectDiagnostics`
+- `OpenInteractionChannel`
+- `SendInteractionInput`
+- `AcknowledgeInteractionMessage`
+- `CloseInteractionChannel`
 
 Unsupported optional protocol operations return a failed
 `adapter.operation_result` with `error.classification` set to
@@ -103,7 +107,10 @@ path for controller heartbeat inventory. `CreateSnapshot` returns a canonical
 v1 `snapshot_descriptor` with a canonical `snapshot_manifest` content ref and a
 namespaced local descriptor reference for inspection-only restore. Artifact and
 diagnostic collection operations return schema-valid `artifact_manifest`
-payloads with bounded local file content references. OpenCode-specific work
+payloads with bounded local file content references. Interaction channel
+operations use a controller-workspace-local session/message journal under
+`interactions/<interaction_session_id>/` and return schema-valid
+`interaction_session` / `interaction_message` payloads. OpenCode-specific work
 remains an implementation detail behind that boundary.
 
 For local debugging, the adapter also exposes a direct observation convenience:

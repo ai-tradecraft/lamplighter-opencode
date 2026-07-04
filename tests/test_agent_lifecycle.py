@@ -743,6 +743,108 @@ def test_adapter_operation_CollectsDiagnostics_ThenReturnsDiagnosticManifest(tmp
     assert {artifact["artifact_type"] for artifact in artifacts} == {"diagnostic"}
 
 
+def test_adapter_operation_InteractionChannelLifecycle_ThenPersistsSessionAndMessages(tmp_path: Path) -> None:
+    controller_workspace = tmp_path / "controller"
+    content_path = tmp_path / "message.md"
+    content_path.write_text("Here is the clarification.", encoding="utf-8")
+    content_bytes = content_path.read_bytes()
+    interaction_target: dict[str, object] = {
+        "runtime_id": "agent_one",
+        "agent_session_id": "session_one",
+        "invocation_id": "turn_one",
+        "interaction_session_id": "interaction_one",
+    }
+    open_payload: dict[str, object] = {
+        "document_type": "interaction_session",
+        "interaction_session_id": "interaction_one",
+        "target": {"controller_id": "controller_one", **interaction_target},
+        "mode": "synchronous",
+        "purpose": "clarification",
+        "status": "requested",
+        "participants": [
+            {
+                "participant_ref": "agent://agent_one/session_one",
+                "role": "agent",
+                "joined_at": "2026-07-02T00:00:00Z",
+            },
+            {
+                "participant_ref": "user://operator/test",
+                "role": "operator",
+                "joined_at": "2026-07-02T00:00:01Z",
+            },
+        ],
+        "created_at": "2026-07-02T00:00:00Z",
+        "updated_at": "2026-07-02T00:00:00Z",
+    }
+    message_payload: dict[str, object] = {
+        "document_type": "interaction_message",
+        "message_id": "message_one",
+        "interaction_session_id": "interaction_one",
+        "sequence": 1,
+        "sender_ref": "user://operator/test",
+        "content_ref": {
+            "uri": content_path.resolve().as_uri(),
+            "sha256": hashlib.sha256(content_bytes).hexdigest(),
+            "content_type": "text/markdown",
+            "length": len(content_bytes),
+        },
+        "sent_at": "2026-07-02T00:00:02Z",
+    }
+    operations = [
+        (
+            "open",
+            _adapter_operation("OpenInteractionChannel", interaction_target, open_payload, controller_workspace),
+        ),
+        (
+            "send",
+            _adapter_operation("SendInteractionInput", interaction_target, message_payload, controller_workspace),
+        ),
+        (
+            "ack",
+            _adapter_operation(
+                "AcknowledgeInteractionMessage",
+                interaction_target,
+                {"interaction_session_id": "interaction_one", "message_id": "message_one"},
+                controller_workspace,
+            ),
+        ),
+        (
+            "close",
+            _adapter_operation("CloseInteractionChannel", interaction_target, {}, controller_workspace),
+        ),
+    ]
+
+    envelopes: list[dict[str, object]] = []
+    for suffix, operation in operations:
+        operation["operation_id"] = f"cmd_interaction_{suffix}"
+        operation["idempotency_key"] = f"interaction_{suffix}"
+        operation_path = tmp_path / f"interaction-{suffix}.json"
+        operation_path.write_text(json.dumps(operation), encoding="utf-8")
+
+        result = runner.invoke(app, ["adapter-operation", "--operation", str(operation_path), "--json"])
+
+        assert result.exit_code == 0, result.stdout
+        envelope = json.loads(result.stdout)
+        validate_agent_runtime_contract("runtime-adapter-message.schema.json", envelope)
+        envelopes.append(envelope)
+
+    opened = _read_result_ref_payload(envelopes[0])
+    sent = _read_result_ref_payload(envelopes[1])
+    acknowledged = _read_result_ref_payload(envelopes[2])
+    closed = _read_result_ref_payload(envelopes[3])
+    validate_agent_runtime_contract("runtime-resources.schema.json", opened)
+    validate_agent_runtime_contract("runtime-resources.schema.json", sent)
+    validate_agent_runtime_contract("runtime-resources.schema.json", acknowledged)
+    validate_agent_runtime_contract("runtime-resources.schema.json", closed)
+    assert opened["status"] == "active"
+    assert sent["message_id"] == "message_one"
+    assert "acknowledged_at" in acknowledged
+    assert closed["status"] == "closed"
+    interaction_root = controller_workspace / "interactions" / "interaction_one"
+    assert (interaction_root / "session.json").is_file()
+    assert (interaction_root / "messages.jsonl").read_text(encoding="utf-8").count("message_one") == 1
+
+
 def test_restore_snapshot_rejects_tampered_workspace_file(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("LAMPLIGHTER_OPENCODE_USE_REAL_BACKEND", raising=False)
     controller_workspace = tmp_path / "controller"
