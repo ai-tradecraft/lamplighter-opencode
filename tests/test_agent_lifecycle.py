@@ -116,6 +116,10 @@ def test_adapter_operation_starts_runtime_from_shared_envelope(tmp_path: Path, m
     assert payload["agent_id"] == "agent_one"
     assert payload["status"] == "planned"
     assert agent_layout(controller_workspace, "agent_one").metadata_path.is_file()
+    events = _read_adapter_events(controller_workspace)
+    assert [event["event_type"] for event in events] == ["runtime.ready"]
+    assert events[0]["sequence"] == 1
+    assert events[0]["aggregate"] == {"type": "runtime", "id": "agent_one"}
 
 
 def test_adapter_operation_ReplayedWithSameIdempotencyKey_ThenReturnsStoredResult(tmp_path: Path, monkeypatch) -> None:
@@ -624,6 +628,9 @@ def test_adapter_operation_CreatesAndRestoresSnapshot_ThenReturnsResultRefs(tmp_
     manifest_path = Path(unquote(urlparse(cast(str, manifest_ref["uri"])).path))
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     validate_agent_runtime_contract("runtime-resources.schema.json", manifest)
+    events = _read_adapter_events(controller_workspace)
+    assert [event["event_type"] for event in events] == ["snapshot.content_ready"]
+    assert events[0]["aggregate"] == {"type": "snapshot", "id": descriptor["snapshot_id"]}
 
     restore_path = tmp_path / "restore-snapshot-operation.json"
     restore_operation = _adapter_operation(
@@ -843,6 +850,16 @@ def test_adapter_operation_InteractionChannelLifecycle_ThenPersistsSessionAndMes
     interaction_root = controller_workspace / "interactions" / "interaction_one"
     assert (interaction_root / "session.json").is_file()
     assert (interaction_root / "messages.jsonl").read_text(encoding="utf-8").count("message_one") == 1
+    events = _read_adapter_events(controller_workspace)
+    assert [event["event_type"] for event in events] == [
+        "interaction.opened",
+        "interaction.message",
+        "interaction.acknowledged",
+        "interaction.closed",
+    ]
+    assert [event["sequence"] for event in events] == [1, 2, 3, 4]
+    message_event_payload = cast(dict[str, object], events[1]["payload"])
+    assert message_event_payload["document_type"] == "interaction_message"
 
 
 def test_restore_snapshot_rejects_tampered_workspace_file(tmp_path: Path, monkeypatch) -> None:
@@ -1054,3 +1071,11 @@ def _read_result_ref_payload(envelope: dict[str, object]) -> dict[str, object]:
     payload = json.loads(Path(unquote(parsed.path)).read_text(encoding="utf-8"))
     assert isinstance(payload, dict)
     return payload
+
+
+def _read_adapter_events(controller_workspace: Path) -> list[dict[str, object]]:
+    journal_path = controller_workspace / "adapter-events" / "events.jsonl"
+    events = [json.loads(line) for line in journal_path.read_text(encoding="utf-8").splitlines() if line]
+    for event in events:
+        validate_agent_runtime_contract("runtime-adapter-message.schema.json", event)
+    return events

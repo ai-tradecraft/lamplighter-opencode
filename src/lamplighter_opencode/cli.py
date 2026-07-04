@@ -510,6 +510,7 @@ def adapter_operation(
         if result is None:
             payload, content_type = _execute_adapter_operation(operation_value)
             result = _adapter_operation_result(operation_value, operation, payload, content_type)
+            _record_adapter_event(operation_value, payload)
             _record_idempotent_result(operation_value, result)
     except (
         AdapterOperationError,
@@ -993,6 +994,202 @@ def _adapter_operation_result(
         "correlation": _operation_object(operation, "correlation"),
         "result_ref": result_ref,
     }
+
+
+def _record_adapter_event(operation: dict[str, object], result_payload: dict[str, Any]) -> None:
+    event = _adapter_event_for_operation(operation, result_payload)
+    if event is None:
+        return
+
+    extensions = _operation_object(operation, "extensions")
+    controller_workspace = Path(_extension_string(extensions, "tradecraft.dev/controller_workspace"))
+    event_root = controller_workspace / "adapter-events"
+    event_root.mkdir(parents=True, exist_ok=True)
+    sequence = _next_adapter_event_sequence(event_root)
+    event["sequence"] = sequence
+    event["event_id"] = f"event_{sequence}"
+    validate_agent_runtime_contract("runtime-adapter-message.schema.json", event)
+    journal_path = event_root / "events.jsonl"
+    with journal_path.open("a", encoding="utf-8") as journal:
+        journal.write(json.dumps(event, sort_keys=True))
+        journal.write("\n")
+
+
+def _next_adapter_event_sequence(event_root: Path) -> int:
+    sequence_path = event_root / "sequence.txt"
+    if not sequence_path.exists():
+        sequence_path.write_text("1", encoding="utf-8")
+        return 1
+    current = int(sequence_path.read_text(encoding="utf-8"))
+    sequence = current + 1
+    sequence_path.write_text(str(sequence), encoding="utf-8")
+    return sequence
+
+
+def _adapter_event_for_operation(
+    operation: dict[str, object],
+    result_payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    operation_type = _operation_string(operation, "operation_type")
+    target = _operation_object(operation, "target")
+    if operation_type == "StartRuntime":
+        return _adapter_event(
+            operation,
+            event_type="runtime.ready",
+            aggregate_type="runtime",
+            aggregate_id=_target_string(target, "runtime_id"),
+            target=target,
+            payload=result_payload,
+        )
+    if operation_type == "StopRuntime":
+        return _adapter_event(
+            operation,
+            event_type="runtime.stopped",
+            aggregate_type="runtime",
+            aggregate_id=_target_string(target, "runtime_id"),
+            target=target,
+            payload=result_payload,
+        )
+    if operation_type == "CreateSession":
+        session_id = _result_string(result_payload, "session_id")
+        return _adapter_event(
+            operation,
+            event_type="session.created",
+            aggregate_type="agent_session",
+            aggregate_id=session_id,
+            target={**target, "agent_session_id": session_id},
+            payload=result_payload,
+        )
+    if operation_type == "CloseSession":
+        return _adapter_event(
+            operation,
+            event_type="session.closed",
+            aggregate_type="agent_session",
+            aggregate_id=_target_string(target, "agent_session_id"),
+            target=target,
+            payload=result_payload,
+        )
+    if operation_type == "StartInvocation":
+        return _adapter_event(
+            operation,
+            event_type="invocation.outcome_reported",
+            aggregate_type="invocation",
+            aggregate_id=_target_string(target, "invocation_id"),
+            target=target,
+            payload=_invocation_outcome_payload(result_payload),
+        )
+    if operation_type == "CreateSnapshot":
+        snapshot_id = _result_string(result_payload, "snapshot_id")
+        return _adapter_event(
+            operation,
+            event_type="snapshot.content_ready",
+            aggregate_type="snapshot",
+            aggregate_id=snapshot_id,
+            target={**target, "snapshot_id": snapshot_id},
+            payload=result_payload,
+        )
+    if operation_type == "OpenInteractionChannel":
+        interaction_id = _result_string(result_payload, "interaction_session_id")
+        return _adapter_event(
+            operation,
+            event_type="interaction.opened",
+            aggregate_type="interaction_session",
+            aggregate_id=interaction_id,
+            target={**target, "interaction_session_id": interaction_id},
+            payload=result_payload,
+        )
+    if operation_type == "SendInteractionInput":
+        return _adapter_event(
+            operation,
+            event_type="interaction.message",
+            aggregate_type="interaction_session",
+            aggregate_id=_result_string(result_payload, "interaction_session_id"),
+            target=target,
+            payload=result_payload,
+        )
+    if operation_type == "AcknowledgeInteractionMessage":
+        return _adapter_event(
+            operation,
+            event_type="interaction.acknowledged",
+            aggregate_type="interaction_session",
+            aggregate_id=_result_string(result_payload, "interaction_session_id"),
+            target=target,
+            payload=result_payload,
+        )
+    if operation_type == "CloseInteractionChannel":
+        return _adapter_event(
+            operation,
+            event_type="interaction.closed",
+            aggregate_type="interaction_session",
+            aggregate_id=_result_string(result_payload, "interaction_session_id"),
+            target=target,
+            payload=result_payload,
+        )
+    return None
+
+
+def _adapter_event(
+    operation: dict[str, object],
+    *,
+    event_type: str,
+    aggregate_type: str,
+    aggregate_id: str,
+    target: dict[str, object],
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "message_type": "adapter.event",
+        "protocol_version": _operation_string(operation, "protocol_version"),
+        "schema_version": _operation_string(operation, "schema_version"),
+        "event_id": "event_pending_sequence",
+        "adapter_kind": ADAPTER_KIND,
+        "adapter_version": ADAPTER_VERSION,
+        "event_type": event_type,
+        "aggregate": {
+            "type": aggregate_type,
+            "id": aggregate_id,
+        },
+        "sequence": 1,
+        "occurred_at": _utc_now(),
+        "payload_schema_version": _operation_string(operation, "schema_version"),
+        "target": target,
+        "correlation": _operation_object(operation, "correlation"),
+        "payload": payload,
+    }
+
+
+def _invocation_outcome_payload(result_payload: dict[str, Any]) -> dict[str, Any]:
+    status = _result_string(result_payload, "status")
+    if status == "completed":
+        kind = "completed"
+    elif status == "cancelled":
+        kind = "cancelled"
+    else:
+        kind = "non_retryable_failure"
+    outcome: dict[str, Any] = {
+        "kind": kind,
+        "summary": str(result_payload.get("message") or f"Invocation {status}."),
+        "confidence": 1,
+        "extensions": {
+            "tradecraft.dev/legacy_agent_turn_result": result_payload,
+        },
+    }
+    failure_report = result_payload.get("failure_report")
+    if isinstance(failure_report, dict):
+        outcome["error"] = {
+            "code": str(failure_report.get("code") or "agent_turn_failed"),
+            "classification": str(failure_report.get("classification") or "provider_unavailable"),
+            "summary": str(failure_report.get("summary") or outcome["summary"]),
+            "retryable": bool(failure_report.get("retryable", False)),
+        }
+    return outcome
+
+
+def _result_string(result_payload: dict[str, Any], key: str) -> str:
+    value = result_payload[key]
+    if not isinstance(value, str) or not value:
+        raise ContractValidationError(f"Adapter operation result {key} must be a non-empty string.")
+    return value
 
 
 def _adapter_operation_failure(operation: dict[str, object], exc: Exception) -> dict[str, object]:

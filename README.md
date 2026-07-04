@@ -110,8 +110,11 @@ diagnostic collection operations return schema-valid `artifact_manifest`
 payloads with bounded local file content references. Interaction channel
 operations use a controller-workspace-local session/message journal under
 `interactions/<interaction_session_id>/` and return schema-valid
-`interaction_session` / `interaction_message` payloads. OpenCode-specific work
-remains an implementation detail behind that boundary.
+`interaction_session` / `interaction_message` payloads. Completed mutating
+operations with canonical mappings also append schema-valid `adapter.event`
+envelopes to `adapter-events/events.jsonl` with monotonic local sequence
+numbers. OpenCode-specific work remains an implementation detail behind that
+boundary.
 
 For local debugging, the adapter also exposes a direct observation convenience:
 
