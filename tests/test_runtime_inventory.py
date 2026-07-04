@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import cast
 from urllib.parse import unquote, urlparse
 
 from typer.testing import CliRunner
@@ -113,3 +114,81 @@ def test_adapter_operation_inspects_runtime_inventory(tmp_path: Path) -> None:
     assert parsed.scheme == "file"
     inventory = json.loads(Path(unquote(parsed.path)).read_text(encoding="utf-8"))
     assert inventory["adapter_kind"] == "opencode"
+
+
+def test_adapter_operation_describes_adapter(tmp_path: Path) -> None:
+    controller_workspace = tmp_path / "controller"
+    operation_path = tmp_path / "operation.json"
+    operation = _adapter_operation("DescribeAdapter", "describe_one", controller_workspace)
+    validate_agent_runtime_contract("runtime-adapter-message.schema.json", operation)
+    operation_path.write_text(json.dumps(operation), encoding="utf-8")
+
+    result = runner.invoke(app, ["adapter-operation", "--operation", str(operation_path), "--json"])
+
+    assert result.exit_code == 0, result.stdout
+    envelope = json.loads(result.stdout)
+    validate_agent_runtime_contract("runtime-adapter-message.schema.json", envelope)
+    descriptor = _read_result_ref_payload(envelope)
+    validate_agent_runtime_contract("runtime-adapter-message.schema.json", descriptor)
+    assert descriptor["message_type"] == "adapter.descriptor"
+    assert descriptor["adapter_kind"] == "opencode"
+    capabilities = cast(dict[str, object], descriptor["capabilities"])
+    assert capabilities["snapshot_capture"] is True
+
+
+def test_adapter_operation_checks_readiness(tmp_path: Path) -> None:
+    controller_workspace = tmp_path / "controller"
+    controller_workspace.mkdir()
+    operation_path = tmp_path / "operation.json"
+    operation = _adapter_operation("CheckReadiness", "readiness_one", controller_workspace)
+    validate_agent_runtime_contract("runtime-adapter-message.schema.json", operation)
+    operation_path.write_text(json.dumps(operation), encoding="utf-8")
+
+    result = runner.invoke(app, ["adapter-operation", "--operation", str(operation_path), "--json"])
+
+    assert result.exit_code == 0, result.stdout
+    envelope = json.loads(result.stdout)
+    validate_agent_runtime_contract("runtime-adapter-message.schema.json", envelope)
+    readiness = _read_result_ref_payload(envelope)
+    assert readiness["status"] == "ready"
+    assert readiness["adapter_kind"] == "opencode"
+
+
+def _adapter_operation(
+    operation_type: str,
+    operation_id: str,
+    controller_workspace: Path,
+) -> dict[str, object]:
+    return {
+        "message_type": "adapter.operation",
+        "protocol_version": "1.0",
+        "schema_version": "1.0",
+        "operation_id": operation_id,
+        "operation_type": operation_type,
+        "idempotency_key": operation_id,
+        "target": {"controller_id": "controller_one"},
+        "deadline": "2026-07-02T00:00:00Z",
+        "fencing_token": 1,
+        "correlation": {"command_id": operation_id},
+        "authorization_context": {
+            "subject_ref": "system://tests",
+            "grant_ref": "authorization-grant://tests/1",
+            "issued_at": "2026-07-02T00:00:00Z",
+        },
+        "extensions": {
+            "tradecraft.dev/controller_workspace": str(controller_workspace),
+        },
+    }
+
+
+def _read_result_ref_payload(envelope: dict[str, object]) -> dict[str, object]:
+    result_ref = envelope["result_ref"]
+    assert isinstance(result_ref, dict)
+    result_ref = cast(dict[str, object], result_ref)
+    uri = result_ref["uri"]
+    assert isinstance(uri, str)
+    parsed = urlparse(uri)
+    assert parsed.scheme == "file"
+    payload = json.loads(Path(unquote(parsed.path)).read_text(encoding="utf-8"))
+    assert isinstance(payload, dict)
+    return payload

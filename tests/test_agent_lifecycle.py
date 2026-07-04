@@ -118,6 +118,85 @@ def test_adapter_operation_starts_runtime_from_shared_envelope(tmp_path: Path, m
     assert agent_layout(controller_workspace, "agent_one").metadata_path.is_file()
 
 
+def test_adapter_operation_ReplayedWithSameIdempotencyKey_ThenReturnsStoredResult(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("CHAT_THROUGH_HARNESS_LOG_ROOT", raising=False)
+    controller_workspace = tmp_path / "controller"
+    operation_path = tmp_path / "operation.json"
+    operation_path.write_text(
+        json.dumps(
+            _adapter_operation("StartRuntime", {"runtime_id": "agent_one"}, _agent_spec(), controller_workspace)
+        ),
+        encoding="utf-8",
+    )
+    start_calls = 0
+
+    def fake_start_agent(layout, **kwargs):  # noqa: ANN001, ANN202, ARG001
+        nonlocal start_calls
+        start_calls += 1
+        return {
+            "status": "planned",
+            "endpoint": "http://127.0.0.1:4097",
+            "workspace": str(layout.workspace_dir),
+        }
+
+    monkeypatch.setattr("lamplighter_opencode.cli.start_agent", fake_start_agent)
+
+    first = runner.invoke(app, ["adapter-operation", "--operation", str(operation_path), "--json"])
+    second = runner.invoke(app, ["adapter-operation", "--operation", str(operation_path), "--json"])
+
+    assert first.exit_code == 0, first.stdout
+    assert second.exit_code == 0, second.stdout
+    assert json.loads(second.stdout) == json.loads(first.stdout)
+    assert start_calls == 1
+
+
+def test_adapter_operation_ReusedIdempotencyKeyForDifferentOperation_ThenReportsConflict(tmp_path: Path) -> None:
+    controller_workspace = tmp_path / "controller"
+    first_path = tmp_path / "first-operation.json"
+    second_path = tmp_path / "second-operation.json"
+    first_path.write_text(
+        json.dumps(_adapter_operation("InspectRuntime", {}, {}, controller_workspace)),
+        encoding="utf-8",
+    )
+    second_operation = _adapter_operation(
+        "ReadTranscript", {"runtime_id": "agent_one", "agent_session_id": "s1"}, {}, controller_workspace
+    )
+    second_path.write_text(json.dumps(second_operation), encoding="utf-8")
+
+    first = runner.invoke(app, ["adapter-operation", "--operation", str(first_path), "--json"])
+    second = runner.invoke(app, ["adapter-operation", "--operation", str(second_path), "--json"])
+
+    assert first.exit_code == 0, first.stdout
+    assert second.exit_code == 0, second.stdout
+    envelope = json.loads(second.stdout)
+    validate_agent_runtime_contract("runtime-adapter-message.schema.json", envelope)
+    assert envelope["status"] == "failed"
+    assert envelope["error"]["classification"] == "conflict"
+    assert envelope["error"]["code"] == "idempotency_conflict"
+
+
+def test_adapter_operation_UnsupportedOptionalOperation_ThenReportsUnsupportedCapability(tmp_path: Path) -> None:
+    controller_workspace = tmp_path / "controller"
+    operation_path = tmp_path / "operation.json"
+    operation_path.write_text(
+        json.dumps(
+            _adapter_operation(
+                "PauseInvocation", {"runtime_id": "agent_one", "invocation_id": "turn_one"}, {}, controller_workspace
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["adapter-operation", "--operation", str(operation_path), "--json"])
+
+    assert result.exit_code == 0, result.stdout
+    envelope = json.loads(result.stdout)
+    validate_agent_runtime_contract("runtime-adapter-message.schema.json", envelope)
+    assert envelope["status"] == "failed"
+    assert envelope["error"]["classification"] == "unsupported_capability"
+    assert envelope["error"]["code"] == "unsupported_capability"
+
+
 def test_adapter_operation_submits_turn_from_shared_envelope(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("LAMPLIGHTER_OPENCODE_USE_REAL_BACKEND", raising=False)
     controller_workspace = tmp_path / "controller"
@@ -486,6 +565,77 @@ def test_create_and_restore_agent_snapshot(tmp_path: Path, monkeypatch) -> None:
         )
     )
     assert restored_session["status"] == "restored"
+
+
+def test_adapter_operation_CreatesAndRestoresSnapshot_ThenReturnsResultRefs(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("LAMPLIGHTER_OPENCODE_USE_REAL_BACKEND", raising=False)
+    controller_workspace = tmp_path / "controller"
+    spec_path = tmp_path / "agent-spec.json"
+    spec_path.write_text(json.dumps(_agent_spec()), encoding="utf-8")
+    runner.invoke(
+        app,
+        [
+            "prepare-agent",
+            "--spec",
+            str(spec_path),
+            "--controller-workspace",
+            str(controller_workspace),
+            "--skip-backend-env-check",
+        ],
+    )
+    layout = agent_layout(controller_workspace, "agent_one")
+    (layout.workspace_dir / "notes.md").write_text("snapshot me", encoding="utf-8")
+    create_path = tmp_path / "create-snapshot-operation.json"
+    create_payload: dict[str, object] = {
+        "document_type": "snapshot_request",
+        "request_id": "snapshot_request_one",
+        "target": {"controller_id": "controller_one", "runtime_id": "agent_one"},
+        "purpose": "recovery_point",
+        "requested_by": "controller",
+        "reason": "test recovery point",
+        "include": ["workspace", "agent_spec", "restore_recipe"],
+        "requested_at": "2026-07-02T00:00:00Z",
+    }
+    create_operation = _adapter_operation(
+        "CreateSnapshot",
+        {"runtime_id": "agent_one"},
+        create_payload,
+        controller_workspace,
+    )
+    create_operation["operation_id"] = "cmd_snapshot_create"
+    create_operation["idempotency_key"] = "snapshot_create_one"
+    create_path.write_text(json.dumps(create_operation), encoding="utf-8")
+
+    created = runner.invoke(app, ["adapter-operation", "--operation", str(create_path), "--json"])
+
+    assert created.exit_code == 0, created.stdout
+    created_envelope = json.loads(created.stdout)
+    validate_agent_runtime_contract("runtime-adapter-message.schema.json", created_envelope)
+    descriptor = _read_result_ref_payload(created_envelope)
+    descriptor_path = Path(cast(str, descriptor["descriptor_path"]))
+    assert descriptor_path.exists()
+
+    restore_path = tmp_path / "restore-snapshot-operation.json"
+    restore_operation = _adapter_operation(
+        "RestoreSnapshot",
+        {"runtime_id": "agent_one"},
+        {"descriptor_path": str(descriptor_path), "restored_agent_id": "agent_restored"},
+        controller_workspace,
+    )
+    restore_operation["operation_id"] = "cmd_snapshot_restore"
+    restore_operation["idempotency_key"] = "snapshot_restore_one"
+    restore_path.write_text(json.dumps(restore_operation), encoding="utf-8")
+
+    restored = runner.invoke(app, ["adapter-operation", "--operation", str(restore_path), "--json"])
+
+    assert restored.exit_code == 0, restored.stdout
+    restored_envelope = json.loads(restored.stdout)
+    validate_agent_runtime_contract("runtime-adapter-message.schema.json", restored_envelope)
+    restore_payload = _read_result_ref_payload(restored_envelope)
+    assert restore_payload["status"] == "restored"
+    assert restore_payload["restored_agent_id"] == "agent_restored"
+    restored_layout = agent_layout(controller_workspace, "agent_restored")
+    assert (restored_layout.workspace_dir / "notes.md").read_text(encoding="utf-8") == "snapshot me"
 
 
 def test_restore_snapshot_rejects_tampered_workspace_file(tmp_path: Path, monkeypatch) -> None:

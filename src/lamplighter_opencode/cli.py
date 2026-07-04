@@ -43,6 +43,24 @@ from lamplighter_opencode.runtime.workspace import submit_turn as submit_turn_re
 
 app = typer.Typer()
 console = Console()
+ADAPTER_KIND = "opencode"
+ADAPTER_VERSION = "0.1.0"
+SUPPORTED_ADAPTER_OPERATIONS = frozenset(
+    {
+        "DescribeAdapter",
+        "ValidateRuntimeSpec",
+        "CheckReadiness",
+        "InspectRuntime",
+        "StartRuntime",
+        "StopRuntime",
+        "CreateSession",
+        "StartInvocation",
+        "CloseSession",
+        "ReadTranscript",
+        "CreateSnapshot",
+        "RestoreSnapshot",
+    }
+)
 
 SpecPathArgument = Annotated[
     Path | None,
@@ -77,6 +95,28 @@ ControllerWorkspaceOption = Annotated[
     Path,
     typer.Option(help="Controller-owned root containing isolated agent workspaces."),
 ]
+
+
+class AdapterOperationError(RuntimeError):
+    """Base error for adapter operation failures that map to protocol errors."""
+
+    classification = "internal_adapter_error"
+    code = "adapter_operation_failed"
+    retryable = False
+
+
+class UnsupportedAdapterOperationError(AdapterOperationError):
+    """Raised when the adapter receives a known but unsupported protocol operation."""
+
+    classification = "unsupported_capability"
+    code = "unsupported_capability"
+
+
+class IdempotencyConflictError(AdapterOperationError):
+    """Raised when an idempotency key is reused for a different operation."""
+
+    classification = "conflict"
+    code = "idempotency_conflict"
 
 
 @app.callback(invoke_without_command=True)
@@ -460,9 +500,20 @@ def adapter_operation(
         raise typer.Exit(code=1) from exc
 
     try:
-        payload, content_type = _execute_adapter_operation(operation_value)
-        result = _adapter_operation_result(operation_value, operation, payload, content_type)
-    except (ContractValidationError, OSError, RuntimeError, ValueError, json.JSONDecodeError, KeyError) as exc:
+        result = _replay_idempotent_result(operation_value)
+        if result is None:
+            payload, content_type = _execute_adapter_operation(operation_value)
+            result = _adapter_operation_result(operation_value, operation, payload, content_type)
+            _record_idempotent_result(operation_value, result)
+    except (
+        AdapterOperationError,
+        ContractValidationError,
+        OSError,
+        RuntimeError,
+        ValueError,
+        json.JSONDecodeError,
+        KeyError,
+    ) as exc:
         result = _adapter_operation_failure(operation_value, exc)
     validate_agent_runtime_contract("runtime-adapter-message.schema.json", result)
 
@@ -483,6 +534,36 @@ def _execute_adapter_operation(operation: dict[str, object]) -> tuple[dict[str, 
     target = _operation_object(operation, "target")
     extensions = _operation_object(operation, "extensions")
     controller_workspace = Path(_extension_string(extensions, "tradecraft.dev/controller_workspace"))
+
+    if operation_type == "DescribeAdapter":
+        return (_adapter_descriptor(), "application/vnd.tradecraft.adapter-descriptor+json")
+
+    if operation_type == "ValidateRuntimeSpec":
+        payload = operation.get("payload")
+        if isinstance(payload, dict) and payload.get("message_type") == "adapter.resolved_runtime_spec":
+            validate_agent_runtime_contract("runtime-adapter-message.schema.json", cast(dict[str, Any], payload))
+        return (
+            {
+                "valid": True,
+                "validated_at": _utc_now(),
+                "adapter_kind": ADAPTER_KIND,
+                "adapter_version": ADAPTER_VERSION,
+                "diagnostics": [],
+            },
+            "application/vnd.tradecraft.runtime-spec-validation+json",
+        )
+
+    if operation_type == "CheckReadiness":
+        return (
+            {
+                "status": "ready" if controller_workspace.exists() else "not_ready",
+                "checked_at": _utc_now(),
+                "controller_workspace": str(controller_workspace),
+                "adapter_kind": ADAPTER_KIND,
+                "adapter_version": ADAPTER_VERSION,
+            },
+            "application/vnd.tradecraft.adapter-readiness+json",
+        )
 
     if operation_type == "InspectRuntime":
         return (observe_runtime_inventory(controller_workspace), "application/vnd.tradecraft.runtime-inventory+json")
@@ -558,7 +639,78 @@ def _execute_adapter_operation(operation: dict[str, object]) -> tuple[dict[str, 
         validate_contract("agent_chat_history.schema.json", payload)
         return (payload, "application/vnd.tradecraft.agent-chat-history+json")
 
-    raise ValueError(f"Unsupported adapter operation: {operation_type}")
+    if operation_type == "CreateSnapshot":
+        payload = _adapter_operation_payload(operation)
+        if payload.get("document_type") == "snapshot_request":
+            validate_agent_runtime_contract("runtime-resources.schema.json", payload)
+        descriptor = create_agent_snapshot(
+            controller_workspace,
+            _target_string(target, "runtime_id"),
+            session_id=_optional_target_string(target, "agent_session_id"),
+            purpose=_snapshot_purpose(payload),
+            initiator=str(payload.get("requested_by") or "adapter"),
+            consistency=_snapshot_consistency(payload),
+            checkpoint_candidate=bool(payload.get("checkpoint_candidate", False)),
+        )
+        return (descriptor, "application/vnd.tradecraft.local-snapshot-descriptor+json")
+
+    if operation_type == "RestoreSnapshot":
+        payload = _adapter_operation_payload(operation)
+        restored_agent = payload.get("restored_agent_id")
+        if restored_agent is not None and not isinstance(restored_agent, str):
+            raise ContractValidationError("RestoreSnapshot restored_agent_id must be a string when present.")
+        return (
+            restore_agent_snapshot(
+                _snapshot_descriptor_path(payload),
+                controller_workspace,
+                restored_agent_id=restored_agent,
+            ),
+            "application/vnd.tradecraft.local-snapshot-restore-result+json",
+        )
+
+    raise UnsupportedAdapterOperationError(f"Unsupported adapter operation: {operation_type}")
+
+
+def _adapter_descriptor() -> dict[str, Any]:
+    descriptor = {
+        "message_type": "adapter.descriptor",
+        "protocol_version": "1.0",
+        "schema_version": "1.0",
+        "adapter_kind": ADAPTER_KIND,
+        "adapter_version": ADAPTER_VERSION,
+        "deployment_modes": ["local_process"],
+        "capabilities": {
+            "persistent_runtime": True,
+            "persistent_sessions": True,
+            "concurrent_sessions": True,
+            "streaming_output": False,
+            "synchronous_interaction": False,
+            "agent_initiated_interaction": False,
+            "pause_resume": False,
+            "snapshot_capture": True,
+            "agent_suggested_snapshots": False,
+            "exact_snapshot_restore": False,
+            "reconstructed_restore": True,
+            "snapshot_consistency_modes": ["crash_consistent"],
+            "snapshot_transfer_profiles": ["local_content_handle"],
+            "document_publication_source": False,
+            "artifact_collection": False,
+            "transcript_read": True,
+            "transcript_source_ids": True,
+        },
+        "limits": {
+            "max_concurrent_runtimes": 32,
+            "max_concurrent_sessions_per_runtime": 32,
+            "max_concurrent_invocations_per_runtime": 1,
+        },
+        "config_schema": "adapter-schema://opencode/1.0",
+        "composition": {
+            "backend": {"kind": "opencode", "version": "configured-locally"},
+            "execution_environment": {"kind": "local_process", "version": "1.0"},
+        },
+    }
+    validate_agent_runtime_contract("runtime-adapter-message.schema.json", descriptor)
+    return descriptor
 
 
 def _adapter_operation_result(
@@ -596,6 +748,17 @@ def _adapter_operation_failure(operation: dict[str, object], exc: Exception) -> 
         fencing_token = 1
         correlation = {"command_id": "unknown_command"}
 
+    classification = "internal_adapter_error"
+    code = "adapter_operation_failed"
+    retryable = False
+    if isinstance(exc, AdapterOperationError):
+        classification = exc.classification
+        code = exc.code
+        retryable = exc.retryable
+    elif isinstance(exc, ContractValidationError):
+        classification = "invalid_request"
+        code = "invalid_request"
+
     return {
         "message_type": "adapter.operation_result",
         "protocol_version": protocol_version,
@@ -607,10 +770,10 @@ def _adapter_operation_failure(operation: dict[str, object], exc: Exception) -> 
         "fencing_token": fencing_token,
         "correlation": correlation,
         "error": {
-            "code": "adapter_operation_failed",
-            "classification": "internal_adapter_error",
+            "code": code,
+            "classification": classification,
             "summary": str(exc),
-            "retryable": False,
+            "retryable": retryable,
         },
     }
 
@@ -657,6 +820,95 @@ def _agent_turn_request_payload(operation: dict[str, object]) -> dict[str, Any]:
     return cast(dict[str, Any], legacy_payload)
 
 
+def _snapshot_purpose(payload: dict[str, Any]) -> str:
+    purpose = str(payload.get("purpose") or "recovery_point")
+    if purpose == "checkpoint_candidate":
+        return "checkpoint"
+    if purpose == "recovery_point":
+        return "recovery"
+    return purpose.replace("_", "-")
+
+
+def _snapshot_consistency(payload: dict[str, Any]) -> str:
+    consistency = payload.get("consistency")
+    if consistency in {"application_consistent", "quiesced", "crash_consistent"}:
+        return str(consistency).replace("_", "-")
+    return "crash-consistent"
+
+
+def _snapshot_descriptor_path(payload: dict[str, Any]) -> Path:
+    snapshot_value = payload.get("snapshot")
+    if isinstance(snapshot_value, str):
+        return Path(snapshot_value)
+    descriptor_path = payload.get("descriptor_path")
+    if isinstance(descriptor_path, str):
+        return Path(descriptor_path)
+    descriptor_ref = payload.get("descriptor_ref")
+    if isinstance(descriptor_ref, dict):
+        uri = descriptor_ref.get("uri")
+        if isinstance(uri, str):
+            parsed = urlparse(uri)
+            if parsed.scheme == "file":
+                return Path(unquote(parsed.path))
+    raise ContractValidationError("RestoreSnapshot requires snapshot, descriptor_path, or file descriptor_ref.uri.")
+
+
+def _replay_idempotent_result(operation: dict[str, object]) -> dict[str, object] | None:
+    record_path = _idempotency_record_path(operation)
+    if record_path is None or not record_path.is_file():
+        return None
+    record = _read_json_object(record_path)
+    if record.get("fingerprint") != _operation_fingerprint(operation):
+        raise IdempotencyConflictError("Idempotency key was reused for a different adapter operation.")
+    result = record.get("result")
+    if not isinstance(result, dict):
+        raise ContractValidationError("Stored idempotent adapter result must be a JSON object.")
+    return cast(dict[str, object], result)
+
+
+def _record_idempotent_result(operation: dict[str, object], result: dict[str, object]) -> None:
+    record_path = _idempotency_record_path(operation)
+    if record_path is None:
+        return
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_json(
+        record_path,
+        {
+            "idempotency_key": _operation_string(operation, "idempotency_key"),
+            "operation_id": _operation_string(operation, "operation_id"),
+            "fingerprint": _operation_fingerprint(operation),
+            "recorded_at": _utc_now(),
+            "result": result,
+        },
+    )
+
+
+def _idempotency_record_path(operation: dict[str, object]) -> Path | None:
+    try:
+        extensions = _operation_object(operation, "extensions")
+        controller_workspace = Path(_extension_string(extensions, "tradecraft.dev/controller_workspace"))
+        key = _safe_identifier(_operation_string(operation, "idempotency_key"), "idem_")
+    except (ContractValidationError, KeyError, TypeError, ValueError):
+        return None
+    return controller_workspace / "adapter-operations" / key / "result.json"
+
+
+def _operation_fingerprint(operation: dict[str, object]) -> str:
+    material = {
+        "operation_type": operation.get("operation_type"),
+        "target": operation.get("target"),
+        "payload": operation.get("payload"),
+        "payload_ref": operation.get("payload_ref"),
+    }
+    return hashlib.sha256(json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _safe_identifier(value: str, fallback_prefix: str) -> str:
+    safe = "".join(character if character.isalnum() or character in {"-", "_"} else "_" for character in value)
+    safe = safe.strip("._-")
+    return safe or f"{fallback_prefix}{hashlib.sha256(value.encode('utf-8')).hexdigest()[:16]}"
+
+
 def _write_adapter_operation_result_payload(
     operation_path: Path,
     payload: dict[str, Any],
@@ -671,6 +923,10 @@ def _write_adapter_operation_result_payload(
         "content_type": content_type,
         "length": len(payload_bytes),
     }
+
+
+def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 def _operation_string(operation: dict[str, object], key: str) -> str:
@@ -691,6 +947,15 @@ def _target_string(target: dict[str, object], key: str) -> str:
     value = target[key]
     if not isinstance(value, str) or not value:
         raise ContractValidationError(f"Adapter operation target {key} must be a non-empty string.")
+    return value
+
+
+def _optional_target_string(target: dict[str, object], key: str) -> str | None:
+    value = target.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise ContractValidationError(f"Adapter operation target {key} must be a non-empty string when present.")
     return value
 
 
